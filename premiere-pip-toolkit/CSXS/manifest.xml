@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ExtensionManifest Version="9.0" ExtensionBundleId="com.penyeditco.pip.toolkit" ExtensionBundleVersion="1.0.0" ExtensionBundleName="PiP Toolkit" xmlns="http://ns.adobe.com/extension">
+  <ExtensionList>
+    <Extension Id="com.penyeditco.pip.toolkit.panel" Version="1.0.0" />
+  </ExtensionList>
+  <ExecutionEnvironment>
+    <HostList>
+      <!-- Premiere Pro 15.0 (2021) and newer -->
+      <Host Name="PPRO" Version="[15.0,99.9]" />
+    </HostList>
+    <LocaleList>
+      <Locale Code="All" />
+    </LocaleList>
+    <RequiredRuntimeList>
+      <RequiredRuntime Name="CSXS" Version="9.0" />
+    </RequiredRuntimeList>
+  </ExecutionEnvironment>
+  <DispatchInfoList>
+    <Extension Id="com.penyeditco.pip.toolkit.panel">
+      <DispatchInfo>
+        <Resources>
+          <MainPath>./client/index.html</MainPath>
+          <ScriptPath>./host/hostscript.jsx</ScriptPath>
+        </Resources>
+        <Lifecycle>
+          <AutoVisible>true</AutoVisible>
+        </Lifecycle>
+        <UI>
+          <Type>Panel</Type>
+          <Menu>PiP Toolkit</Menu>
+          <Geometry>
+            <Size>
+              <Height>720</Height>
+              <Width>380</Width>
+            </Size>
+            <MinSize>
+              <Height>520</Height>
+              <Width>340</Width>
+            </MinSize>
+            <MaxSize>
+              <Height>2000</Height>
+              <Width>900</Width>
+            </MaxSize>
+          </Geometry>
+        </UI>
+      </DispatchInfo>
+    </Extension>
+  </DispatchInfoList>
+</ExtensionManifest>

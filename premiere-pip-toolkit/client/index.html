@@ -1,0 +1,211 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>PiP Toolkit</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div id="app">
+
+    <header class="topbar">
+      <div class="tabs">
+        <button class="tab active" data-tab="zoom">Zoom</button>
+        <button class="tab" data-tab="highlight">Highlight</button>
+        <button class="tab" data-tab="overlay">Overlay</button>
+      </div>
+      <button id="refreshBtn" class="icon-btn" title="Refresh selection info">&#8635;</button>
+    </header>
+
+    <div class="context-bar" id="contextBar">Loading sequence info&hellip;</div>
+
+    <div class="stage-wrap">
+      <div id="stage" class="stage">
+        <div id="stagePoint" class="stage-point" hidden></div>
+        <div id="stageRect" class="stage-rect" hidden>
+          <div class="rect-handle" data-handle="nw"></div>
+          <div class="rect-handle" data-handle="ne"></div>
+          <div class="rect-handle" data-handle="sw"></div>
+          <div class="rect-handle" data-handle="se"></div>
+        </div>
+      </div>
+      <p class="stage-hint" id="stageHint">Click in the frame to set the zoom point.</p>
+    </div>
+
+    <!-- ===================== ZOOM PANEL ===================== -->
+    <section class="panel" id="panel-zoom">
+      <div class="row">
+        <label>Scale <span class="val" id="zoomScaleVal">200%</span></label>
+        <input type="range" id="zoomScale" min="105" max="400" value="200" />
+      </div>
+      <div class="row two-col">
+        <div>
+          <label>Ease in <span class="val" id="zoomInVal">0.6s</span></label>
+          <input type="range" id="zoomIn" min="0.1" max="3" step="0.1" value="0.6" />
+        </div>
+        <div>
+          <label>Easing</label>
+          <select id="zoomEasing">
+            <option value="easeInOut" selected>Ease in/out</option>
+            <option value="easeOut">Ease out</option>
+            <option value="easeIn">Ease in</option>
+            <option value="linear">Linear</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <label class="checkbox">
+          <input type="checkbox" id="zoomOutToggle" />
+          Zoom back out after a hold
+        </label>
+      </div>
+      <div class="row two-col" id="zoomOutRow" hidden>
+        <div>
+          <label>Hold <span class="val" id="zoomHoldVal">1.0s</span></label>
+          <input type="range" id="zoomHold" min="0" max="8" step="0.1" value="1.0" />
+        </div>
+        <div>
+          <label>Ease out <span class="val" id="zoomOutVal">0.6s</span></label>
+          <input type="range" id="zoomOut" min="0.1" max="3" step="0.1" value="0.6" />
+        </div>
+      </div>
+      <button class="primary" id="zoomApply">Animate Zoom</button>
+    </section>
+
+    <!-- ===================== HIGHLIGHT PANEL ===================== -->
+    <section class="panel hidden" id="panel-highlight">
+      <div class="row">
+        <label>Style</label>
+        <div class="segmented" id="hlStyle">
+          <button class="seg active" data-val="draw">Draw</button>
+          <button class="seg" data-val="pop">Pop</button>
+          <button class="seg" data-val="fade">Fade</button>
+        </div>
+      </div>
+      <div class="row two-col">
+        <div>
+          <label>In <span class="val" id="hlInVal">0.4s</span></label>
+          <input type="range" id="hlIn" min="0.1" max="3" step="0.1" value="0.4" />
+        </div>
+        <div>
+          <label>Hold <span class="val" id="hlHoldVal">1.5s</span></label>
+          <input type="range" id="hlHold" min="0" max="8" step="0.1" value="1.5" />
+        </div>
+      </div>
+      <div class="row">
+        <label>Out <span class="val" id="hlOutVal">0.4s</span></label>
+        <input type="range" id="hlOut" min="0.1" max="3" step="0.1" value="0.4" />
+      </div>
+      <div class="row">
+        <label>Background dim <span class="val" id="hlDimVal">60%</span></label>
+        <input type="range" id="hlDim" min="0" max="100" value="60" />
+      </div>
+      <div class="row">
+        <label class="checkbox">
+          <input type="checkbox" id="hlMagnify" checked />
+          Magnify highlighted region
+        </label>
+      </div>
+      <div class="row" id="hlMagnifyRow">
+        <label>Magnify amount <span class="val" id="hlMagnifyVal">140%</span></label>
+        <input type="range" id="hlMagnifyPct" min="100" max="300" value="140" />
+      </div>
+      <div class="row two-col">
+        <div>
+          <label class="checkbox">
+            <input type="checkbox" id="hlBorder" checked />
+            Border
+          </label>
+          <input type="range" id="hlBorderPx" min="1" max="16" value="4" />
+        </div>
+        <div>
+          <label class="checkbox">
+            <input type="checkbox" id="hlGlow" checked />
+            Glow
+          </label>
+          <input type="color" id="hlGlowColor" value="#ffd23f" />
+        </div>
+      </div>
+      <button class="primary" id="hlApply">Animate Highlight</button>
+    </section>
+
+    <!-- ===================== OVERLAY PANEL ===================== -->
+    <section class="panel hidden" id="panel-overlay">
+      <div class="row">
+        <label>Preset position</label>
+        <div class="grid9" id="ovGrid">
+          <button data-val="tl"></button><button data-val="tc"></button><button data-val="tr"></button>
+          <button data-val="cl"></button><button data-val="cc" class="active"></button><button data-val="cr"></button>
+          <button data-val="bl"></button><button data-val="bc"></button><button data-val="br"></button>
+        </div>
+        <label class="checkbox small">
+          <input type="checkbox" id="ovCustom" />
+          Use custom position (drag point in frame above)
+        </label>
+      </div>
+      <div class="row">
+        <label>Size <span class="val" id="ovScaleVal">35%</span></label>
+        <input type="range" id="ovScale" min="10" max="150" value="35" />
+      </div>
+      <div class="row">
+        <label>Shape</label>
+        <div class="segmented" id="ovShape">
+          <button class="seg active" data-val="rect">Rectangle</button>
+          <button class="seg" data-val="round">Rounded / Circle</button>
+        </div>
+      </div>
+      <div class="row two-col">
+        <div>
+          <label class="checkbox">
+            <input type="checkbox" id="ovBorder" checked />
+            Border
+          </label>
+          <input type="range" id="ovBorderPx" min="1" max="16" value="4" />
+        </div>
+        <div>
+          <label class="checkbox">
+            <input type="checkbox" id="ovGlow" />
+            Glow
+          </label>
+          <input type="color" id="ovGlowColor" value="#42e2ff" />
+        </div>
+      </div>
+      <div class="row">
+        <label class="checkbox">
+          <input type="checkbox" id="ovShadow" checked />
+          Drop shadow
+        </label>
+      </div>
+      <div class="row three-col" id="ovShadowRow">
+        <div>
+          <label>Dist</label>
+          <input type="range" id="ovShadowDist" min="0" max="40" value="8" />
+        </div>
+        <div>
+          <label>Soft</label>
+          <input type="range" id="ovShadowSoft" min="0" max="60" value="20" />
+        </div>
+        <div>
+          <label>Opac</label>
+          <input type="range" id="ovShadowOpacity" min="0" max="100" value="55" />
+        </div>
+      </div>
+      <div class="row">
+        <label>Animate in</label>
+        <select id="ovAnim">
+          <option value="slide" selected>Slide from edge</option>
+          <option value="pop">Pop in</option>
+          <option value="fade">Fade in</option>
+          <option value="none">None (snap to position)</option>
+        </select>
+      </div>
+      <button class="primary" id="ovApply">Animate Overlay</button>
+    </section>
+
+    <footer class="statusbar" id="statusBar">Ready.</footer>
+  </div>
+
+  <script src="js/stage.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
