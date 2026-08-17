@@ -188,6 +188,102 @@ function getContext() {
   }
 }
 
+//////////////////////// live frame thumbnail ////////////////////////
+
+// Premiere's scripting API has no direct "give me the current frame as a
+// bitmap" call. The documented way to get one is to have Premiere export a
+// still frame through its own encoder (Sequence.exportAsMediaDirect), which
+// needs a path to a PNG/JPEG export preset (.epr) file. Rather than ship a
+// hand-authored .epr - a proprietary format that's easy to get subtly wrong
+// - this searches the machine's own Adobe application-support folder for a
+// real preset Adobe already installed, and tries whichever ones it finds
+// whose filename suggests a still-image format. This is the most likely
+// spot in the whole toolkit to need adjusting for a specific machine/OS
+// layout; getFrameThumbnail() reports exactly what it tried and why it
+// failed rather than just returning nothing.
+
+function findFilesRecursive(folder, pattern, maxDepth, results, depth) {
+  if (depth > maxDepth || results.length > 300) return;
+  var items;
+  try { items = folder.getFiles(); } catch (e) { return; }
+  for (var i = 0; i < items.length; i++) {
+    var item = items[i];
+    if (item instanceof Folder) {
+      findFilesRecursive(item, pattern, maxDepth, results, depth + 1);
+    } else if (item instanceof File && pattern.test(item.name)) {
+      results.push(item.fsName);
+    }
+    if (results.length > 300) return;
+  }
+}
+
+function findStillFramePresets() {
+  var roots = [];
+  if ($.os.indexOf("Windows") !== -1) {
+    roots.push(new Folder("C:/Program Files/Common Files/Adobe"));
+    roots.push(new Folder(Folder.appData.fsName + "/Adobe"));
+  } else {
+    roots.push(new Folder("/Library/Application Support/Adobe"));
+  }
+
+  var all = [];
+  for (var r = 0; r < roots.length; r++) {
+    if (roots[r].exists) findFilesRecursive(roots[r], /\.epr$/i, 6, all, 0);
+  }
+
+  var preferred = [];
+  for (var i = 0; i < all.length; i++) {
+    if (/png|jpe?g|still|frame/i.test(all[i])) preferred.push(all[i]);
+  }
+  return { preferred: preferred, all: all };
+}
+
+function getFrameThumbnail() {
+  try {
+    var seq = getActiveSeq();
+    var playhead = seq.getPlayerPosition().seconds;
+
+    var fps = 30;
+    try {
+      if (seq.videoFrameRate && seq.videoFrameRate.ticks) fps = 254016000000 / seq.videoFrameRate.ticks;
+    } catch (e) { /* fall back to 30 */ }
+    var frameDur = 1 / fps;
+
+    var origIn, origOut, hadWorkArea = true;
+    try { origIn = seq.getInPoint(); origOut = seq.getOutPoint(); } catch (e) { hadWorkArea = false; }
+
+    try { seq.setInPoint(playhead); seq.setOutPoint(playhead + frameDur * 2); }
+    catch (e) { return "ERR|Could not set a work area on the sequence to export from: " + e.toString(); }
+
+    var found = findStillFramePresets();
+    var candidates = found.preferred.length ? found.preferred : found.all;
+
+    if (!candidates.length) {
+      if (hadWorkArea) { try { seq.setInPoint(origIn); seq.setOutPoint(origOut); } catch (e) {} }
+      return "ERR|No .epr export preset found under Adobe's application support folder on this machine.";
+    }
+
+    var dest = new File(Folder.temp.fsName + "/pip_toolkit_thumb.png");
+    if (dest.exists) { try { dest.remove(); } catch (e) {} }
+
+    var success = false, lastErr = "", triedCount = 0;
+    for (var i = 0; i < candidates.length && !success; i++) {
+      triedCount++;
+      try {
+        seq.exportAsMediaDirect(dest.fsName, candidates[i], 1);
+        if (dest.exists) success = true;
+      } catch (e) { lastErr = e.toString(); }
+    }
+
+    if (hadWorkArea) { try { seq.setInPoint(origIn); seq.setOutPoint(origOut); } catch (e) {} }
+
+    if (success) return "OK|" + dest.fsName;
+    return "ERR|Tried " + triedCount + " export preset(s) found on this machine, none produced a file. Last error: " + (lastErr || "(none thrown, file just never appeared)");
+  } catch (e) {
+    return "ERR|" + e.toString();
+  }
+}
+
 //////////////////////// Tool 1: Zoom ////////////////////////
 
 // px,py: normalized (0..1) point in the frame to zoom into

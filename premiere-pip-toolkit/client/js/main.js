@@ -98,6 +98,30 @@
     ["zoomApply", "hlApply", "ovApply"].forEach(function (id) { q(id).disabled = disabled; });
   }
 
+  // ---------------- live frame thumbnail (best-effort) ----------------
+
+  var thumbBusy = false;
+
+  function refreshThumbnail() {
+    if (thumbBusy) return Promise.resolve();
+    thumbBusy = true;
+    var box = q("stageAspect");
+    return evalScript("getFrameThumbnail()").then(function (result) {
+      if (result.indexOf("OK|") === 0) {
+        var path = result.substring(3).replace(/\\/g, "/");
+        var url = "file://" + (path.charAt(0) === "/" ? "" : "/") + path + "?t=" + Date.now();
+        box.style.backgroundImage = 'url("' + url + '")';
+        box.style.backgroundSize = "cover";
+        box.style.backgroundPosition = "center";
+      } else {
+        box.style.backgroundImage = "";
+        setStatus("No live preview available: " + result.replace(/^ERR\|/, ""), "err");
+      }
+    }).catch(function () {
+      box.style.backgroundImage = "";
+    }).then(function () { thumbBusy = false; });
+  }
+
   // ---------------- tabs ----------------
 
   var tabs = document.querySelectorAll(".tab");
@@ -113,6 +137,7 @@
     Object.keys(panels).forEach(function (k) { panels[k].classList.toggle("hidden", k !== name); });
     q("stageHint").textContent = hints[name];
     stage.setMode(name === "zoom" ? "point" : "rect");
+    refreshThumbnail();
   }
   tabs.forEach(function (t) { t.addEventListener("click", function () { selectTab(t.dataset.tab); }); });
 
@@ -236,7 +261,7 @@
     return evalScript("applyOverlay(" + args.join(",") + ")");
   }));
 
-  q("refreshBtn").addEventListener("click", function () { refreshContext(); });
+  q("refreshBtn").addEventListener("click", function () { refreshContext(); refreshThumbnail(); });
 
   // ---------------- init ----------------
 

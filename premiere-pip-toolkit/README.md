@@ -98,7 +98,21 @@ you need after any update.
    to peak before clicking Animate.
 
 Hit the refresh icon (↻) top-right any time you change your selection — the
-panel also auto-refreshes every few seconds.
+panel also auto-refreshes every few seconds. The live frame preview only
+updates when you switch tabs or hit refresh (exporting a still frame is
+heavier than the other lookups, so it's not on the automatic timer) - move
+the playhead, then hit refresh to see that frame in the box.
+
+**About the live preview specifically:** Premiere's scripting API has no
+direct "give me the current frame as an image" call, so this exports a
+still frame through Premiere's own encoder, using whatever PNG/JPEG export
+preset it can find already installed under Adobe's application support
+folder on your machine. This is the most likely piece of the whole toolkit
+to need a follow-up fix for your specific OS/install layout - if the box
+falls back to the placeholder checkerboard, the status bar at the bottom
+will say exactly what it tried and why it couldn't find/use a preset,
+which is what to send back for a fix. Nothing else in the panel depends on
+this working - positioning/animating still works off the placeholder box.
 
 ## How the automation actually works
 
