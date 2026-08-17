@@ -1,18 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<ExtensionManifest Version="9.0" ExtensionBundleId="com.penyeditco.pip.toolkit" ExtensionBundleVersion="1.0.0" ExtensionBundleName="PiP Toolkit" xmlns="http://ns.adobe.com/extension">
+<ExtensionManifest Version="10.0" ExtensionBundleId="com.penyeditco.pip.toolkit" ExtensionBundleVersion="1.0.0" ExtensionBundleName="PiP Toolkit">
   <ExtensionList>
     <Extension Id="com.penyeditco.pip.toolkit.panel" Version="1.0.0" />
   </ExtensionList>
   <ExecutionEnvironment>
     <HostList>
-      <!-- Premiere Pro 15.0 (2021) and newer -->
-      <Host Name="PPRO" Version="[15.0,99.9]" />
+      <!-- Premiere Pro 14.0 and newer -->
+      <Host Name="PPRO" Version="[14.0,99.9]" />
     </HostList>
     <LocaleList>
       <Locale Code="All" />
     </LocaleList>
     <RequiredRuntimeList>
-      <RequiredRuntime Name="CSXS" Version="9.0" />
+      <RequiredRuntime Name="CSXS" Version="10.0" />
     </RequiredRuntimeList>
   </ExecutionEnvironment>
   <DispatchInfoList>
@@ -42,6 +42,7 @@
               <Width>900</Width>
             </MaxSize>
           </Geometry>
+          <Icons />
         </UI>
       </DispatchInfo>
     </Extension>
