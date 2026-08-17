@@ -53,6 +53,37 @@ If you'd rather do it by hand: copy this whole folder into
 `defaults write com.adobe.CSXS.11 PlayerDebugMode 1` (repeat for the CSXS
 version your Premiere build uses if 11 doesn't do it).
 
+If the extension folder ends up with a macOS "quarantine" flag (this
+happens when you get the files by downloading a ZIP through a browser, and
+makes Premiere silently skip the extension with no error anywhere), clear
+it with:
+```
+xattr -dr com.apple.quarantine ~/"Library/Application Support/Adobe/CEP/extensions/pip-toolkit"
+```
+
+## Updating
+
+If you got this folder via `git clone` (recommended over downloading a
+ZIP — see below), pulling new versions is one command:
+```
+./update.sh
+```
+This pulls the latest changes, makes sure Premiere's extensions folder is
+symlinked straight to this checkout (so there's no separate copying step,
+ever), clears any quarantine flag, and quits Premiere for you (reopen it
+manually afterwards).
+
+If you originally installed via ZIP download rather than `git clone`, switch
+to a proper clone once so `update.sh` has something to pull:
+```
+cd ~/Documents   # or wherever you want to keep it
+git clone -b claude/premiere-editing-plugin-i43hpm https://github.com/Leeevans117/Claude-code.git pip-toolkit-src
+cd pip-toolkit-src/premiere-pip-toolkit
+./install.sh
+```
+From then on, `./update.sh` from inside that folder is the only command
+you need after any update.
+
 ## Using it
 
 1. Select a clip in the timeline (or just park the playhead over it — the

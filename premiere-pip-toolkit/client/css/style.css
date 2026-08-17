@@ -79,15 +79,24 @@ html, body {
   background: #171717;
 }
 
-.stage {
+/* Padding-based aspect ratio box (not the CSS `aspect-ratio` property) so
+   this renders correctly even in older embedded browser engines. */
+.stage-aspect {
   position: relative;
   width: 100%;
-  aspect-ratio: 16 / 9;
+  height: 0;
+  padding-top: 56.25%; /* 16:9 default; overridden inline once sequence size is known */
   background: repeating-conic-gradient(#232323 0% 25%, #202020 0% 50%) 0 0 / 16px 16px;
   border: 1px solid var(--border);
   border-radius: 3px;
   overflow: hidden;
+}
+
+.stage {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
   cursor: crosshair;
+  -webkit-user-drag: none;
 }
 
 .stage-point {
@@ -100,6 +109,8 @@ html, body {
   border: 2px solid var(--accent-2);
   background: rgba(255, 180, 84, 0.25);
   pointer-events: none;
+  -webkit-user-drag: none;
+  z-index: 2;
 }
 .stage-point::after {
   content: "";

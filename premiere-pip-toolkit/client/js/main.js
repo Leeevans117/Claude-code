@@ -118,7 +118,7 @@
 
   // ---------------- stage ----------------
 
-  var stage = new Stage(q("stage"), q("stagePoint"), q("stageRect"));
+  var stage = new Stage(q("stage"), q("stagePoint"), q("stageRect"), q("stageAspect"));
   stage.setMode("point");
 
   // ---------------- live range labels ----------------
