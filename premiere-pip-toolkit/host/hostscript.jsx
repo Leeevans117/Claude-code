@@ -302,7 +302,7 @@ function applyZoom(pxStr, pyStr, scalePctStr, inSecStr, holdSecStr, outSecStr, z
     var inSec = Math.max(0.05, parseFloat(inSecStr));
     var holdSec = Math.max(0, parseFloat(holdSecStr));
     var outSec = Math.max(0.05, parseFloat(outSecStr));
-    var zoomOut = zoomOutStr === "1";
+    var zoomOut = String(zoomOutStr) === "1";
 
     var motion = getComponentByMatchName(item, "AE.ADBE Motion");
     if (!motion) return "ERR|Could not find the Motion effect on this clip.";
@@ -312,16 +312,25 @@ function applyZoom(pxStr, pyStr, scalePctStr, inSecStr, holdSecStr, outSecStr, z
 
     var W = seq.frameSizeHorizontal, H = seq.frameSizeVertical;
     var cx = W / 2, cy = H / 2;
-    var targetX = px * W, targetY = py * H;
+    var targetX = clamp(px, 0, 1) * W, targetY = clamp(py, 0, 1) * H;
 
-    function posFor(s) { return [cx - s * (targetX - cx), cy - s * (targetY - cy)]; }
+    // Neutral framing (no pan, no zoom) - the frame's default Motion state.
+    var neutralPos = [cx, cy];
+    // Position that puts the clicked point (targetX,targetY) dead-center at
+    // full target scale. Only valid AT that scale - it is not a "keep this
+    // point centered at every scale" formula, which is why the in-between
+    // keyframes below interpolate the two positions directly instead of
+    // recomputing this per intermediate scale.
+    var zoomedPos = [cx - scale * (targetX - cx), cy - scale * (targetY - cy)];
+
+    function lerp(a, b, t) { return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]; }
 
     var playhead = seq.getPlayerPosition().seconds;
     var clipStart = item.start.seconds, clipEnd = item.end.seconds;
     var t0 = clamp(playhead - inSec, clipStart, clipEnd);
     var t1 = clamp(playhead, clipStart, clipEnd);
 
-    setKeyframe(posParam, t0, posFor(1));
+    setKeyframe(posParam, t0, neutralPos);
     setKeyframe(scaleParam, t0, 100);
 
     var steps = 6, i, f, e, s, tt;
@@ -330,21 +339,21 @@ function applyZoom(pxStr, pyStr, scalePctStr, inSecStr, holdSecStr, outSecStr, z
       e = easeSample(f, easing);
       s = 1 + (scale - 1) * e;
       tt = t0 + (t1 - t0) * f;
-      setKeyframe(posParam, tt, posFor(s));
+      setKeyframe(posParam, tt, lerp(neutralPos, zoomedPos, e));
       setKeyframe(scaleParam, tt, s * 100);
     }
 
     if (zoomOut) {
       var t2 = clamp(t1 + holdSec, clipStart, clipEnd);
       var t3 = clamp(t2 + outSec, clipStart, clipEnd);
-      setKeyframe(posParam, t2, posFor(scale));
+      setKeyframe(posParam, t2, zoomedPos);
       setKeyframe(scaleParam, t2, scale * 100);
       for (i = 1; i <= steps; i++) {
         f = i / steps;
         e = easeSample(f, easing);
         s = scale - (scale - 1) * e;
         tt = t2 + (t3 - t2) * f;
-        setKeyframe(posParam, tt, posFor(s));
+        setKeyframe(posParam, tt, lerp(zoomedPos, neutralPos, e));
         setKeyframe(scaleParam, tt, s * 100);
       }
     }
@@ -377,12 +386,12 @@ function applyHighlight(pxStr, pyStr, pwStr, phStr, style, magnifyStr, magnifyPc
     if (!orig.projectItem) return "ERR|Selected clip has no source media reference; can't duplicate it.";
 
     var px = parseFloat(pxStr), py = parseFloat(pyStr), pw = parseFloat(pwStr), ph = parseFloat(phStr);
-    var magnify = magnifyStr === "1";
+    var magnify = String(magnifyStr) === "1";
     var magnifyScale = parseFloat(magnifyPctStr) / 100;
     var dim = clamp(parseFloat(dimStr), 0, 100);
-    var border = borderStr === "1";
+    var border = String(borderStr) === "1";
     var borderPx = parseFloat(borderPxStr);
-    var glow = glowStr === "1";
+    var glow = String(glowStr) === "1";
     var inSec = Math.max(0.05, parseFloat(inSecStr));
     var holdSec = Math.max(0, parseFloat(holdSecStr));
     var outSec = Math.max(0.05, parseFloat(outSecStr));
@@ -488,18 +497,20 @@ function applyHighlight(pxStr, pyStr, pwStr, phStr, style, magnifyStr, magnifyPc
           var W = seq.frameSizeHorizontal, H = seq.frameSizeVertical;
           var cx = W / 2, cy = H / 2;
           var boxCx = (px + pw / 2) * W, boxCy = (py + ph / 2) * H;
-          function posFor(s) { return [cx - s * (boxCx - cx), cy - s * (boxCy - cy)]; }
-          setKeyframe(posP, t0, posFor(1));
+          var neutralPos2 = [cx, cy];
+          var magnifiedPos = [cx - magnifyScale * (boxCx - cx), cy - magnifyScale * (boxCy - cy)];
+          function lerp2(a, b, t) { return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]; }
+          setKeyframe(posP, t0, neutralPos2);
           setKeyframe(scaleP, t0, 100);
           for (var k = 1; k <= 6; k++) {
             var fk = k / 6, ek = easeSample(fk, "easeInOut");
             var sk = 1 + (magnifyScale - 1) * ek;
-            setKeyframe(posP, t0 + (t1 - t0) * fk, posFor(sk));
+            setKeyframe(posP, t0 + (t1 - t0) * fk, lerp2(neutralPos2, magnifiedPos, ek));
             setKeyframe(scaleP, t0 + (t1 - t0) * fk, sk * 100);
           }
-          setKeyframe(posP, t2, posFor(magnifyScale));
+          setKeyframe(posP, t2, magnifiedPos);
           setKeyframe(scaleP, t2, magnifyScale * 100);
-          setKeyframe(posP, t3, posFor(1));
+          setKeyframe(posP, t3, neutralPos2);
           setKeyframe(scaleP, t3, 100);
         }
       }
@@ -577,9 +588,9 @@ function applyOverlay(preset, pxStr, pyStr, scalePctStr, shape,
       cx = presets[preset][0] * W; cy = presets[preset][1] * H;
     }
     var scale = clamp(parseFloat(scalePctStr), 5, 400);
-    var borderOn = borderStr === "1", borderPx = parseFloat(borderPxStr);
-    var glowOn = glowStr === "1";
-    var shadowOn = shadowStr === "1";
+    var borderOn = String(borderStr) === "1", borderPx = parseFloat(borderPxStr);
+    var glowOn = String(glowStr) === "1";
+    var shadowOn = String(shadowStr) === "1";
     var shadowDist = parseFloat(shadowDistStr), shadowSoft = parseFloat(shadowSoftStr), shadowOpacity = parseFloat(shadowOpacityStr);
     var inSec = Math.max(0.05, parseFloat(inSecStr));
 
