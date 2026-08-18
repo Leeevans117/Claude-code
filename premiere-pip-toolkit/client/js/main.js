@@ -43,6 +43,7 @@
       var msgs = codes.map(function (c) { return WARN_MESSAGES[c] || c; });
       return { ok: true, text: "Done, but: " + msgs.join("; ") + "." };
     }
+    if (result.indexOf("OK|debug:") === 0) return { ok: true, text: "Done. " + result.substring(9) };
     if (result.indexOf("ERR|") === 0) return { ok: false, text: result.substring(4) };
     return { ok: false, text: "Unexpected response: " + result };
   }
@@ -50,6 +51,7 @@
   function setStatus(text, kind) {
     var bar = q("statusBar");
     bar.textContent = text;
+    bar.title = text; // full text on hover / selectable, in case it's longer than the bar
     bar.className = "statusbar" + (kind ? " " + kind : "");
   }
 

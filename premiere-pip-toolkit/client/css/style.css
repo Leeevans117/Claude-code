@@ -272,8 +272,9 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   background: var(--panel);
   border-top: 1px solid var(--border);
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow-x: auto;
+  user-select: text; /* debug output needs to be copy-pasteable */
+  cursor: text;
 }
 .statusbar.ok { color: var(--ok); }
 .statusbar.err { color: var(--danger); }

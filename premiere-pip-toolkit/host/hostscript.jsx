@@ -78,8 +78,35 @@ function setKeyframe(param, seconds, value) {
   var t = new Time();
   t.seconds = seconds;
   ensureTimeVarying(param);
-  try { param.addKey(t); } catch (e) { /* key may already exist here */ }
-  param.setValueAtKey(t, value, true);
+  // addKey() likely snaps to the nearest frame boundary and hands back that
+  // snapped Time. Reusing our own unsnapped `t` for setValueAtKey afterward
+  // can then target a different instant than the keyframe that actually got
+  // created, leaving the real keyframe at whatever default Premiere
+  // initializes a fresh one to and the value silently landing nowhere - so
+  // prefer whatever addKey() returns, when it returns something Time-like.
+  var keyTime = t;
+  try {
+    var added = param.addKey(t);
+    if (added && typeof added.seconds === "number") keyTime = added;
+  } catch (e) { /* key may already exist here */ }
+  param.setValueAtKey(keyTime, value, true);
+  return keyTime;
+}
+
+// Reads a parameter's value back however this Premiere version supports it,
+// for verifying a set actually stuck instead of assuming it did.
+function readParamValue(param, t) {
+  try { if (typeof param.getValueAtKey === "function") return param.getValueAtKey(t); } catch (e) {}
+  try { if (typeof param.getValueAtTime === "function") return param.getValueAtTime(t.ticks); } catch (e) {}
+  try { return param.getValue(); } catch (e) {}
+  return undefined;
+}
+
+function fmtVal(v) {
+  if (v === undefined) return "(unreadable)";
+  if (v === null) return "null";
+  if (v instanceof Array) { var parts = []; for (var i = 0; i < v.length; i++) parts.push(v[i]); return "[" + parts.join(",") + "]"; }
+  return String(v);
 }
 
 function trySetColor(component, displayName, hex) {
@@ -330,16 +357,16 @@ function applyZoom(pxStr, pyStr, scalePctStr, inSecStr, holdSecStr, outSecStr, z
     var t0 = clamp(playhead - inSec, clipStart, clipEnd);
     var t1 = clamp(playhead, clipStart, clipEnd);
 
-    setKeyframe(posParam, t0, neutralPos);
+    var keyTime0 = setKeyframe(posParam, t0, neutralPos);
     setKeyframe(scaleParam, t0, 100);
 
-    var steps = 6, i, f, e, s, tt;
+    var steps = 6, i, f, e, s, tt, keyTimePeak;
     for (i = 1; i <= steps; i++) {
       f = i / steps;
       e = easeSample(f, easing);
       s = 1 + (scale - 1) * e;
       tt = t0 + (t1 - t0) * f;
-      setKeyframe(posParam, tt, lerp(neutralPos, zoomedPos, e));
+      keyTimePeak = setKeyframe(posParam, tt, lerp(neutralPos, zoomedPos, e));
       setKeyframe(scaleParam, tt, s * 100);
     }
 
@@ -357,7 +384,13 @@ function applyZoom(pxStr, pyStr, scalePctStr, inSecStr, holdSecStr, outSecStr, z
         setKeyframe(scaleParam, tt, s * 100);
       }
     }
-    return "OK";
+
+    // Read back what actually landed, rather than assuming the sets above
+    // stuck - this is the hard evidence needed if the value is still wrong.
+    var readback0 = readParamValue(posParam, keyTime0);
+    var readbackPeak = readParamValue(posParam, keyTimePeak);
+    return "OK|debug:intended0=" + fmtVal(neutralPos) + " actual0=" + fmtVal(readback0) +
+      " intendedPeak=" + fmtVal(zoomedPos) + " actualPeak=" + fmtVal(readbackPeak);
   } catch (e) {
     return "ERR|" + e.toString();
   }
