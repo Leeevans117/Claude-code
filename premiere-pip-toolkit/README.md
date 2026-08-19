@@ -106,33 +106,64 @@ even then it may say it's cooling down if you just requested one. Move the
 playhead, then hit refresh to try loading that frame into the box.
 
 **About the live preview specifically — read this before relying on it:**
-Premiere's scripting API has no direct "give me the current frame as an
-image" call, so this exports a still frame through Premiere's own encoder
-(`Sequence.exportAsMediaDirect`), using whatever PNG/JPEG-looking export
-preset it can find already installed under Adobe's application support
-folder on your machine. That is a **real, synchronous call into Premiere's
-encoder on your live sequence**, using a preset this panel didn't author
-and can't fully verify — there's a documented Adobe Community report of
-Premiere crashing when this API is called repeatedly in quick succession.
-For that reason this feature now deliberately:
-- only ever runs when you explicitly click refresh, never automatically;
-- enforces a short cooldown between attempts, and refuses a second request
-  while one is already in flight;
-- only tries a handful of candidate presets per click instead of hammering
-  through every one it finds (if none of that batch works, clicking refresh
-  again tries the next batch);
-- searches the machine for a usable preset once per Premiere session and
-  reuses that, rather than re-scanning every time.
+Premiere's officially *documented* scripting API has no "give me the
+current frame as an image" call at all (confirmed by reading Adobe's own
+generated scripting reference directly — no such method exists there). The
+only two real ways to get a frame out of a live sequence are (1) run it
+through the encoder with an export preset (`Sequence.exportAsMediaDirect`),
+or (2) Premiere's undocumented "QE" (Quality Engineering) automation layer,
+which this project already relies on elsewhere (adding filter effects like
+Crop/Bevel Edges/Alpha Glow has no supported API either — see "Known
+limitations" below) and which turns out to expose exactly this:
+`qe.project.getActiveSequence().exportFramePNG(timecode, filePath)`.
 
-It is still the most experimental, least-verified piece of the whole
-toolkit and the one most likely to need a follow-up fix for your specific
-OS/install layout. If the box stays the placeholder checkerboard, the
-status bar at the bottom will say exactly what it tried and why it
-couldn't find/use a preset — that message is what to send back for a fix.
-Nothing else in the panel depends on this working — positioning/animating
-still works off the placeholder box, and if you'd rather not risk it at
-all, simply don't click refresh a second time (the checkerboard box is a
-completely safe no-op).
+This build uses **option 2**, and it's a meaningfully smaller risk surface
+than the encoder-export approach this feature started with:
+- **No export preset at all.** Nothing to search the filesystem for, nothing
+  shipped, nothing unverified handed to the encoder — `exportFramePNG` just
+  rasterizes one frame straight to a PNG.
+- **No sequence work-area mutation.** It takes an explicit timecode (the
+  current playhead position, read from Premiere's own CTI), so there's no
+  more setting-then-restoring in/out points, and no more half-mutated-state
+  failure mode if that restore ever got skipped.
+- It's confirmed *real*, not guessed at: it appears verbatim in Adobe's own
+  official sample code
+  ([Adobe-CEP/Samples, `TypeScript/PProPanel-vscode/dom_app/src/Premiere.jsx`](https://github.com/Adobe-CEP/Samples/blob/master/TypeScript/PProPanel-vscode/dom_app/src/Premiere.jsx)),
+  independently in community-maintained TypeScript type definitions for the
+  exact API generation this panel targets
+  ([`aenhancers/types-for-adobe-extras`, `Premiere/12.0/qeDom.d.ts`](https://github.com/aenhancers/types-for-adobe-extras/blob/master/Premiere/12.0/qeDom.d.ts)),
+  and in a real bug report from someone using it in a shipped panel
+  ([Adobe-CEP/Samples issue #129](https://github.com/Adobe-CEP/Samples/issues/129)).
+
+It's still not risk-free, and it's still the least-verified piece of the
+toolkit — be clear-eyed about that:
+- It's **undocumented** (confirmed absent from Adobe's own generated API
+  reference — this is the same "long-standing community pattern, not
+  officially supported" category as the QE-based effect-adding code
+  elsewhere in this panel, not a documented, Adobe-guaranteed call).
+- There's **no confirmed report either way** on whether calling it
+  repeatedly in quick succession is safe (unlike the old
+  `exportAsMediaDirect` path, where a specific crash report existed). The
+  panel treats it with the same caution anyway: manual/opt-in only (never
+  automatic on tab switch or the periodic context refresh), a short
+  cooldown between attempts, and no in-flight overlapping requests.
+- It needs **Premiere 2021 (v15) or newer** — a Premiere v14.x report
+  describes this call failing with "undefined is not an object" on that
+  older version. The panel detects this (rather than assuming) and reports
+  it clearly if `exportFramePNG` isn't present.
+- **It has not yet been confirmed to actually produce a working thumbnail
+  on a real Premiere install.** Everything above is sourced from reading
+  Adobe's own sample code and API docs directly, not from running this
+  specific panel against a live copy of Premiere — that confirmation still
+  needs to happen on your machine.
+
+If the box stays the placeholder checkerboard, the status bar at the bottom
+will say exactly what went wrong (QE unavailable, wrong Premiere version,
+no active sequence, or `exportFramePNG` ran but no file appeared) — that
+message is what to send back for a fix. Nothing else in the panel depends
+on this working — positioning/animating still works off the placeholder
+box, and if you'd rather not risk it at all, simply don't click refresh
+(the checkerboard box is a completely safe no-op).
 
 ## How the automation actually works
 
@@ -181,6 +212,12 @@ whether a feature works on your specific Premiere version:
   (a lit 3D bevel along the alpha edge) since Premiere has no native flat
   colored-stroke effect — it reads as a border but isn't a flat color; the
   border-color picker is UI-only until a stroke effect is added.
+- **The live frame preview** (see "Using it" above for the full writeup)
+  also uses the QE automation DOM (`exportFramePNG`), for the same reason —
+  there is no documented way to get a frame image out of a sequence at all.
+  It needs Premiere 2021 (v15) or newer and hasn't yet been confirmed
+  working on a real install; if it can't produce a frame, the box just
+  stays the placeholder checkerboard and the status bar says why.
 - Every host-script function returns a structured `OK` / `OK|warn:...` /
   `ERR|...` string that the panel surfaces in the status bar, so failures
   are visible rather than silent.

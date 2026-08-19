@@ -100,22 +100,25 @@
     ["zoomApply", "hlApply", "ovApply"].forEach(function (id) { q(id).disabled = disabled; });
   }
 
-  // ---------------- live frame thumbnail (experimental, manual/opt-in only) ----------------
+  // ---------------- live frame thumbnail (manual/opt-in only) ----------------
 
-  // This calls Premiere's own encoder (Sequence.exportAsMediaDirect) through
-  // whatever export preset it can find on the machine. That call is
-  // synchronous (it blocks Premiere's UI while it runs) and there is a real,
-  // reproducible Adobe Community report of Premiere crashing when it's
-  // called repeatedly in quick succession - see the block comment above
-  // getFrameThumbnail() in hostscript.jsx for sources. So this is
-  // deliberately NOT wired to fire automatically (not on tab switch, not on
-  // the periodic context refresh) - it only ever runs when the user
-  // explicitly clicks the refresh button, thumbBusy prevents a second
-  // request from overlapping a request already in flight, and the host
-  // script itself enforces a cooldown between attempts as a second,
-  // independent guard. If it fails, the box stays the placeholder
-  // checkerboard and the status bar says exactly why - nothing else in the
-  // panel depends on this working.
+  // This calls Premiere's QE automation DOM (qe.project.getActiveSequence().
+  // exportFramePNG(...)) to rasterize the current playhead frame straight to
+  // a PNG - no export preset, no encoder pipeline, no sequence work-area
+  // mutation. See the block comment above getFrameThumbnail() in
+  // hostscript.jsx for exactly why this replaced the old
+  // Sequence.exportAsMediaDirect()-based approach and the sources verifying
+  // it's real (Adobe's own CEP sample code + community type definitions),
+  // not a guess. It's still an undocumented QE call that still runs
+  // synchronously on the live sequence and hasn't been confirmed to work on
+  // a real Premiere install, so this stays deliberately NOT wired to fire
+  // automatically (not on tab switch, not on the periodic context refresh)
+  // - it only ever runs when the user explicitly clicks the refresh button,
+  // thumbBusy prevents a second request from overlapping a request already
+  // in flight, and the host script itself enforces a short cooldown between
+  // attempts as a second, independent guard. If it fails, the box stays the
+  // placeholder checkerboard and the status bar says exactly why - nothing
+  // else in the panel depends on this working.
 
   var thumbBusy = false;
 
