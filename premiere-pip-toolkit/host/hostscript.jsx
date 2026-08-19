@@ -345,8 +345,15 @@ function getFrameThumbnail() {
     var origIn, origOut, hadWorkArea = true;
     try { origIn = seq.getInPoint(); origOut = seq.getOutPoint(); } catch (e) { hadWorkArea = false; }
 
+    // setInPoint() can succeed while the paired setOutPoint() throws (or vice
+    // versa) - if that happens, don't return early leaving the sequence's
+    // work area half-mutated (in point moved, out point untouched); restore
+    // whatever original bounds we captured above before reporting the error.
     try { seq.setInPoint(playhead); seq.setOutPoint(playhead + frameDur * 2); }
-    catch (e) { return "ERR|Could not set a work area on the sequence to export from: " + e.toString(); }
+    catch (e) {
+      if (hadWorkArea) { try { seq.setInPoint(origIn); seq.setOutPoint(origOut); } catch (e2) {} }
+      return "ERR|Could not set a work area on the sequence to export from: " + e.toString();
+    }
 
     var found = findStillFramePresets();
     var full = found.preferred.length ? found.preferred : found.all;
@@ -560,12 +567,28 @@ function applyHighlight(pxStr, pyStr, pwStr, phStr, style, magnifyStr, magnifyPc
     var t3 = clamp(t2 + outSec, origStart, origEnd);
 
     // --- crop reveal on the duplicate ---
-    var cropComp = addFilterByMatchName(seq, dup, "AE.ADBE Crop", "Crop");
+    // matchName is "AE.ADBE AECrop" (NOT "AE.ADBE Crop" - that string matches
+    // nothing, which silently made every crop no-op: getComponentByMatchName()
+    // never found the just-added effect back, so cropComp came back null and
+    // the whole reveal step got skipped every time). Verified against a real
+    // Premiere-exported preset (AE.ADBE AECrop / display name "Crop") and
+    // multiple independent open-source Premiere automation tools that all
+    // agree on this exact string.
+    //
+    // Its four sub-parameters are also NOT called "Left"/"Top"/"Right"/
+    // "Bottom" - Premiere's actual display names are "Crop Left"/"Crop Top"/
+    // "Crop Right"/"Crop Bottom" (confirmed the same way: a captured Premiere
+    // preset export, an independent open-source OTIO/Premiere exporter, and
+    // two independent CEP-panel projects' live-probed param tables all agree).
+    // With the old bare names every getParamByDisplayName() call below
+    // returned null too, so this was a second, compounding cause of the same
+    // "crop never actually happens" failure.
+    var cropComp = addFilterByMatchName(seq, dup, "AE.ADBE AECrop", "Crop");
     if (cropComp) {
-      var pLeft = getParamByDisplayName(cropComp, "Left");
-      var pTop = getParamByDisplayName(cropComp, "Top");
-      var pRight = getParamByDisplayName(cropComp, "Right");
-      var pBottom = getParamByDisplayName(cropComp, "Bottom");
+      var pLeft = getParamByDisplayName(cropComp, "Crop Left");
+      var pTop = getParamByDisplayName(cropComp, "Crop Top");
+      var pRight = getParamByDisplayName(cropComp, "Crop Right");
+      var pBottom = getParamByDisplayName(cropComp, "Crop Bottom");
       var targetLeft = px * 100, targetTop = py * 100;
       var targetRight = (1 - (px + pw)) * 100, targetBottom = (1 - (py + ph)) * 100;
 
@@ -686,6 +709,16 @@ function applyHighlight(pxStr, pyStr, pwStr, phStr, style, magnifyStr, magnifyPc
 
     return warnings.length ? "OK|warn:" + warnings.join(",") : "OK";
   } catch (e) {
+    // `dup` (the duplicate clip created above via overwriteClip) is a `var`,
+    // so it's still in scope here even though it's assigned inside the try
+    // block - if an exception hit anywhere after it was created (e.g. a
+    // setValueAtKey() call throwing because a lookup upstream returned a
+    // stale/wrong param), don't leave an orphaned duplicate clip sitting on
+    // the timeline with nothing to point the user at it; best-effort remove
+    // it before reporting the error.
+    if (typeof dup !== "undefined" && dup) {
+      try { dup.remove(false, false); } catch (e2) { /* best effort only */ }
+    }
     return "ERR|" + e.toString();
   }
 }
