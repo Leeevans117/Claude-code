@@ -224,19 +224,65 @@ function getContext() {
 // hand-authored .epr - a proprietary format that's easy to get subtly wrong
 // - this searches the machine's own Adobe application-support folder for a
 // real preset Adobe already installed, and tries whichever ones it finds
-// whose filename suggests a still-image format. This is the most likely
-// spot in the whole toolkit to need adjusting for a specific machine/OS
-// layout; getFrameThumbnail() reports exactly what it tried and why it
-// failed rather than just returning nothing.
+// whose filename suggests a still-image format.
+//
+// exportAsMediaDirect() is a genuinely risky call to make casually:
+//  - It's DOCUMENTED/verified as synchronous - it blocks Premiere's single
+//    UI/ExtendScript thread for as long as the render takes, on the live
+//    sequence, using whatever .epr preset was found (which may not be a
+//    small/fast one - there's no way to verify a preset's codec, bit depth,
+//    color space, or resolution before handing it to the encoder).
+//  - There's a real, reproducible Adobe Community report of Premiere
+//    crashing roughly 1 in 3 times specifically when exportAsMediaDirect()
+//    is called repeatedly/in a loop, with Premiere becoming unresponsive
+//    right after an export finishes and the next call never starting -
+//    see: community.adobe.com "premiere crashes sporadically when using
+//    sequence exportasmediadirect" (question 685820). That is exactly the
+//    calling pattern this feature used to have: multiple candidate presets
+//    tried back-to-back inside one call, and the whole thing re-run
+//    automatically every time the panel's tab changed.
+//  - The work area type argument matters: app.encoder.ENCODE_WORKAREA is
+//    the documented/verified constant for "honor the in/out I just set"
+//    (see Adobe-CEP/Samples PProPanel/jsx/PPRO/Premiere.jsx, which calls
+//    exportAsMediaDirect(path, preset, app.encoder.ENCODE_WORKAREA) for
+//    exactly this "render a short work-area bracket" use case). This used
+//    to pass the bare literal 1 instead, which is guessing at the enum's
+//    underlying ordinal - if it happened to resolve to ENCODE_ENTIRE or
+//    ENCODE_IN_TO_OUT on this Premiere build instead of ENCODE_WORKAREA,
+//    every "grab one frame" attempt could have silently rendered the WHOLE
+//    active sequence (all tracks, all adjustment layers) through an
+//    unverified preset, synchronously, on the live project - a very
+//    plausible way to produce exactly the kind of crash reported here.
+//
+// Given all of that, this function now: (1) always uses the documented
+// ENCODE_WORKAREA constant instead of a guessed literal, (2) only ever
+// runs the (expensive, whole-of-Adobe) preset search once per Premiere
+// session and reuses the result, (3) refuses to run again while a call is
+// still in flight or within a short cooldown of the last attempt, and (4)
+// only tries a small batch of candidate presets per call instead of
+// hammering through every match it finds. getFrameThumbnail() still
+// reports exactly what it tried and why it failed rather than just
+// returning nothing - see README.md for how this is now wired into the UI
+// (manual/opt-in only, never automatic on tab switch).
 
-function findFilesRecursive(folder, pattern, maxDepth, results, depth) {
-  if (depth > maxDepth || results.length > 300) return;
+var _thumbPresetCache = null;   // null until findStillFramePresets() has run once this session
+var _thumbCandidateOffset = 0;  // rotates which small batch of candidates gets tried next
+var _thumbInProgress = false;
+var _thumbLastAttemptMs = 0;
+var THUMB_COOLDOWN_MS = 4000;        // matches the "don't call it repeatedly in quick succession" lesson above
+var THUMB_MAX_CANDIDATES_PER_CALL = 3;
+var THUMB_FS_VISIT_BUDGET = 8000;    // hard cap on files/folders touched per search, independent of the 300-match cap
+
+function findFilesRecursive(folder, pattern, maxDepth, results, depth, budget) {
+  if (depth > maxDepth || results.length > 300 || budget.count >= budget.max) return;
   var items;
   try { items = folder.getFiles(); } catch (e) { return; }
   for (var i = 0; i < items.length; i++) {
+    budget.count++;
+    if (budget.count >= budget.max) return;
     var item = items[i];
     if (item instanceof Folder) {
-      findFilesRecursive(item, pattern, maxDepth, results, depth + 1);
+      findFilesRecursive(item, pattern, maxDepth, results, depth + 1, budget);
     } else if (item instanceof File && pattern.test(item.name)) {
       results.push(item.fsName);
     }
@@ -244,7 +290,14 @@ function findFilesRecursive(folder, pattern, maxDepth, results, depth) {
   }
 }
 
+// Runs the recursive .epr search at most once per Premiere session - the
+// result (top-level vars in a CEP host script persist for the life of the
+// panel, per Adobe's own CEP HTML Extension Cookbook) is cached in
+// _thumbPresetCache so every subsequent call is free instead of re-walking
+// the whole Adobe application-support tree again.
 function findStillFramePresets() {
+  if (_thumbPresetCache) return _thumbPresetCache;
+
   var roots = [];
   if ($.os.indexOf("Windows") !== -1) {
     roots.push(new Folder("C:/Program Files/Common Files/Adobe"));
@@ -254,18 +307,31 @@ function findStillFramePresets() {
   }
 
   var all = [];
+  var budget = { count: 0, max: THUMB_FS_VISIT_BUDGET };
   for (var r = 0; r < roots.length; r++) {
-    if (roots[r].exists) findFilesRecursive(roots[r], /\.epr$/i, 6, all, 0);
+    if (roots[r].exists) findFilesRecursive(roots[r], /\.epr$/i, 6, all, 0, budget);
   }
 
   var preferred = [];
   for (var i = 0; i < all.length; i++) {
     if (/png|jpe?g|still|frame/i.test(all[i])) preferred.push(all[i]);
   }
-  return { preferred: preferred, all: all };
+  _thumbPresetCache = { preferred: preferred, all: all };
+  return _thumbPresetCache;
 }
 
 function getFrameThumbnail() {
+  if (_thumbInProgress) {
+    return "ERR|A frame preview export is already running - wait for it to finish before requesting another.";
+  }
+  var now = new Date().getTime();
+  if (_thumbLastAttemptMs && (now - _thumbLastAttemptMs) < THUMB_COOLDOWN_MS) {
+    var waitSec = Math.ceil((THUMB_COOLDOWN_MS - (now - _thumbLastAttemptMs)) / 1000);
+    return "ERR|Frame preview is cooling down (calling Premiere's encoder repeatedly in quick succession is a known crash risk) - wait " + waitSec + "s and try again.";
+  }
+
+  _thumbInProgress = true;
+  _thumbLastAttemptMs = now;
   try {
     var seq = getActiveSeq();
     var playhead = seq.getPlayerPosition().seconds;
@@ -283,21 +349,36 @@ function getFrameThumbnail() {
     catch (e) { return "ERR|Could not set a work area on the sequence to export from: " + e.toString(); }
 
     var found = findStillFramePresets();
-    var candidates = found.preferred.length ? found.preferred : found.all;
+    var full = found.preferred.length ? found.preferred : found.all;
 
-    if (!candidates.length) {
+    if (!full.length) {
       if (hadWorkArea) { try { seq.setInPoint(origIn); seq.setOutPoint(origOut); } catch (e) {} }
       return "ERR|No .epr export preset found under Adobe's application support folder on this machine.";
     }
+
+    // Try only a small rotating batch per call (never the whole list) so one
+    // request can't fire off a long back-to-back run of real encoder calls -
+    // that repeated-call pattern is the documented crash trigger. If none of
+    // this batch works, the NEXT call (after the cooldown) picks up where
+    // this one left off, so repeated manual retries still eventually cover
+    // every candidate rather than looping the same failing ones forever.
+    var startIdx = _thumbCandidateOffset % full.length;
+    var batch = [];
+    var batchSize = Math.min(THUMB_MAX_CANDIDATES_PER_CALL, full.length);
+    for (var bi = 0; bi < batchSize; bi++) batch.push(full[(startIdx + bi) % full.length]);
+    _thumbCandidateOffset = (startIdx + batchSize) % full.length;
 
     var dest = new File(Folder.temp.fsName + "/pip_toolkit_thumb.png");
     if (dest.exists) { try { dest.remove(); } catch (e) {} }
 
     var success = false, lastErr = "", triedCount = 0;
-    for (var i = 0; i < candidates.length && !success; i++) {
+    for (var i = 0; i < batch.length && !success; i++) {
       triedCount++;
       try {
-        seq.exportAsMediaDirect(dest.fsName, candidates[i], 1);
+        // ENCODE_WORKAREA is the documented/verified constant for "honor the
+        // in/out points I just set" - see the block comment above this
+        // function for why a guessed literal here is unsafe.
+        seq.exportAsMediaDirect(dest.fsName, batch[i], app.encoder.ENCODE_WORKAREA);
         if (dest.exists) success = true;
       } catch (e) { lastErr = e.toString(); }
     }
@@ -305,9 +386,11 @@ function getFrameThumbnail() {
     if (hadWorkArea) { try { seq.setInPoint(origIn); seq.setOutPoint(origOut); } catch (e) {} }
 
     if (success) return "OK|" + dest.fsName;
-    return "ERR|Tried " + triedCount + " export preset(s) found on this machine, none produced a file. Last error: " + (lastErr || "(none thrown, file just never appeared)");
+    return "ERR|Tried " + triedCount + " of " + full.length + " known export preset(s), none produced a file (hit refresh again to try the next batch). Last error: " + (lastErr || "(none thrown, file just never appeared)");
   } catch (e) {
     return "ERR|" + e.toString();
+  } finally {
+    _thumbInProgress = false;
   }
 }
 

@@ -98,21 +98,41 @@ you need after any update.
    to peak before clicking Animate.
 
 Hit the refresh icon (↻) top-right any time you change your selection — the
-panel also auto-refreshes every few seconds. The live frame preview only
-updates when you switch tabs or hit refresh (exporting a still frame is
-heavier than the other lookups, so it's not on the automatic timer) - move
-the playhead, then hit refresh to see that frame in the box.
+panel's context bar (sequence/clip name) also auto-refreshes every few
+seconds on its own. The live frame preview is **manual/opt-in only**: it
+never fires automatically (not on tab switch, not on the periodic
+refresh) — you have to click the refresh icon yourself to request it, and
+even then it may say it's cooling down if you just requested one. Move the
+playhead, then hit refresh to try loading that frame into the box.
 
-**About the live preview specifically:** Premiere's scripting API has no
-direct "give me the current frame as an image" call, so this exports a
-still frame through Premiere's own encoder, using whatever PNG/JPEG export
+**About the live preview specifically — read this before relying on it:**
+Premiere's scripting API has no direct "give me the current frame as an
+image" call, so this exports a still frame through Premiere's own encoder
+(`Sequence.exportAsMediaDirect`), using whatever PNG/JPEG-looking export
 preset it can find already installed under Adobe's application support
-folder on your machine. This is the most likely piece of the whole toolkit
-to need a follow-up fix for your specific OS/install layout - if the box
-falls back to the placeholder checkerboard, the status bar at the bottom
-will say exactly what it tried and why it couldn't find/use a preset,
-which is what to send back for a fix. Nothing else in the panel depends on
-this working - positioning/animating still works off the placeholder box.
+folder on your machine. That is a **real, synchronous call into Premiere's
+encoder on your live sequence**, using a preset this panel didn't author
+and can't fully verify — there's a documented Adobe Community report of
+Premiere crashing when this API is called repeatedly in quick succession.
+For that reason this feature now deliberately:
+- only ever runs when you explicitly click refresh, never automatically;
+- enforces a short cooldown between attempts, and refuses a second request
+  while one is already in flight;
+- only tries a handful of candidate presets per click instead of hammering
+  through every one it finds (if none of that batch works, clicking refresh
+  again tries the next batch);
+- searches the machine for a usable preset once per Premiere session and
+  reuses that, rather than re-scanning every time.
+
+It is still the most experimental, least-verified piece of the whole
+toolkit and the one most likely to need a follow-up fix for your specific
+OS/install layout. If the box stays the placeholder checkerboard, the
+status bar at the bottom will say exactly what it tried and why it
+couldn't find/use a preset — that message is what to send back for a fix.
+Nothing else in the panel depends on this working — positioning/animating
+still works off the placeholder box, and if you'd rather not risk it at
+all, simply don't click refresh a second time (the checkerboard box is a
+completely safe no-op).
 
 ## How the automation actually works
 

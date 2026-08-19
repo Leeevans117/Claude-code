@@ -100,14 +100,33 @@
     ["zoomApply", "hlApply", "ovApply"].forEach(function (id) { q(id).disabled = disabled; });
   }
 
-  // ---------------- live frame thumbnail (best-effort) ----------------
+  // ---------------- live frame thumbnail (experimental, manual/opt-in only) ----------------
+
+  // This calls Premiere's own encoder (Sequence.exportAsMediaDirect) through
+  // whatever export preset it can find on the machine. That call is
+  // synchronous (it blocks Premiere's UI while it runs) and there is a real,
+  // reproducible Adobe Community report of Premiere crashing when it's
+  // called repeatedly in quick succession - see the block comment above
+  // getFrameThumbnail() in hostscript.jsx for sources. So this is
+  // deliberately NOT wired to fire automatically (not on tab switch, not on
+  // the periodic context refresh) - it only ever runs when the user
+  // explicitly clicks the refresh button, thumbBusy prevents a second
+  // request from overlapping a request already in flight, and the host
+  // script itself enforces a cooldown between attempts as a second,
+  // independent guard. If it fails, the box stays the placeholder
+  // checkerboard and the status bar says exactly why - nothing else in the
+  // panel depends on this working.
 
   var thumbBusy = false;
 
   function refreshThumbnail() {
-    if (thumbBusy) return Promise.resolve();
+    if (thumbBusy) {
+      setStatus("Frame preview is already running - wait for it to finish.", "err");
+      return Promise.resolve();
+    }
     thumbBusy = true;
     var box = q("stageAspect");
+    setStatus("Requesting live frame preview (experimental)…");
     return evalScript("getFrameThumbnail()").then(function (result) {
       if (result.indexOf("OK|") === 0) {
         var path = result.substring(3).replace(/\\/g, "/");
@@ -115,12 +134,14 @@
         box.style.backgroundImage = 'url("' + url + '")';
         box.style.backgroundSize = "cover";
         box.style.backgroundPosition = "center";
+        setStatus("Live preview updated.", "ok");
       } else {
         box.style.backgroundImage = "";
         setStatus("No live preview available: " + result.replace(/^ERR\|/, ""), "err");
       }
-    }).catch(function () {
+    }).catch(function (e) {
       box.style.backgroundImage = "";
+      setStatus("Live preview failed: " + e, "err");
     }).then(function () { thumbBusy = false; });
   }
 
@@ -139,7 +160,10 @@
     Object.keys(panels).forEach(function (k) { panels[k].classList.toggle("hidden", k !== name); });
     q("stageHint").textContent = hints[name];
     stage.setMode(name === "zoom" ? "point" : "rect");
-    refreshThumbnail();
+    // Deliberately NOT calling refreshThumbnail() here - see the comment
+    // above refreshThumbnail() for why the live preview is manual/opt-in
+    // only (hit refresh) rather than firing automatically on every tab
+    // switch.
   }
   tabs.forEach(function (t) { t.addEventListener("click", function () { selectTab(t.dataset.tab); }); });
 
