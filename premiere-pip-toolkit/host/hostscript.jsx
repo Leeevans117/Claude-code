@@ -337,18 +337,34 @@ function applyZoom(pxStr, pyStr, scalePctStr, inSecStr, holdSecStr, outSecStr, z
     var scaleParam = getParamByDisplayName(motion, "Scale") || getParamByDisplayName(motion, "Scale Height");
     if (!posParam || !scaleParam) return "ERR|Could not find Position/Scale on the Motion effect.";
 
-    var W = seq.frameSizeHorizontal, H = seq.frameSizeVertical;
-    var cx = W / 2, cy = H / 2;
-    var targetX = clamp(px, 0, 1) * W, targetY = clamp(py, 0, 1) * H;
+    // IMPORTANT: the Motion effect's "Position" ComponentParam is set/read
+    // through the scripting DOM as a fraction of the frame - [0,0] is the
+    // top-left corner and [1,1] is the bottom-right corner - REGARDLESS of
+    // sequence resolution. This is not what the Effect Controls panel shows
+    // (it always displays pixels), and it's not how Scale works (Scale is a
+    // plain percentage number), which is why only Position was silently
+    // landing on Premiere's clamp/sentinel value: pixel-sized numbers like
+    // 1920 are ~2000x too large for a parameter expecting 0..1, and every
+    // one of those out-of-range calls clamped to the same 32767 (2^15-1)
+    // ceiling regardless of which oversized pixel value was sent - hence
+    // identical X/Y results no matter what "in range" pixel value was tried.
+    // Verified against multiple independent real-world ExtendScript
+    // examples/reports (Adobe Community threads on Position scripting) that
+    // all set/get Position as e.g. [0.5, 0.5] for frame-center, never in
+    // pixels. So all Position math here stays in normalized 0..1 space -
+    // conveniently, px/py/pw/ph are already normalized, so no pixel
+    // conversion is needed (or wanted) at all.
+    var ncx = 0.5, ncy = 0.5;
+    var ntx = clamp(px, 0, 1), nty = clamp(py, 0, 1);
 
     // Neutral framing (no pan, no zoom) - the frame's default Motion state.
-    var neutralPos = [cx, cy];
-    // Position that puts the clicked point (targetX,targetY) dead-center at
+    var neutralPos = [ncx, ncy];
+    // Position that puts the clicked point (ntx,nty) dead-center at
     // full target scale. Only valid AT that scale - it is not a "keep this
     // point centered at every scale" formula, which is why the in-between
     // keyframes below interpolate the two positions directly instead of
     // recomputing this per intermediate scale.
-    var zoomedPos = [cx - scale * (targetX - cx), cy - scale * (targetY - cy)];
+    var zoomedPos = [ncx - scale * (ntx - ncx), ncy - scale * (nty - ncy)];
 
     function lerp(a, b, t) { return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]; }
 
@@ -527,11 +543,12 @@ function applyHighlight(pxStr, pyStr, pwStr, phStr, style, magnifyStr, magnifyPc
         var posP = getParamByDisplayName(motion, "Position");
         var scaleP = getParamByDisplayName(motion, "Scale");
         if (posP && scaleP) {
-          var W = seq.frameSizeHorizontal, H = seq.frameSizeVertical;
-          var cx = W / 2, cy = H / 2;
-          var boxCx = (px + pw / 2) * W, boxCy = (py + ph / 2) * H;
-          var neutralPos2 = [cx, cy];
-          var magnifiedPos = [cx - magnifyScale * (boxCx - cx), cy - magnifyScale * (boxCy - cy)];
+          // Position is normalized 0..1 (see the note in applyZoom()) - px/py/pw/ph
+          // are already fractions of the frame, so no pixel conversion here either.
+          var ncx = 0.5, ncy = 0.5;
+          var boxCx = px + pw / 2, boxCy = py + ph / 2;
+          var neutralPos2 = [ncx, ncy];
+          var magnifiedPos = [ncx - magnifyScale * (boxCx - ncx), ncy - magnifyScale * (boxCy - ncy)];
           function lerp2(a, b, t) { return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]; }
           setKeyframe(posP, t0, neutralPos2);
           setKeyframe(scaleP, t0, 100);
@@ -607,18 +624,20 @@ function applyOverlay(preset, pxStr, pyStr, scalePctStr, shape,
     var item = getTargetTrackItem(seq);
     if (!item) return "ERR|No clip selected and nothing under the playhead on a video track.";
 
-    var W = seq.frameSizeHorizontal, H = seq.frameSizeVertical;
+    // Position is normalized 0..1, not pixels (see the note in applyZoom()) -
+    // so the preset table and the custom px/py input stay in that space and
+    // are never multiplied out to frame dimensions.
     var margin = 0.06;
     var presets = {
       tl: [margin, margin], tc: [0.5, margin], tr: [1 - margin, margin],
       cl: [margin, 0.5], cc: [0.5, 0.5], cr: [1 - margin, 0.5],
       bl: [margin, 1 - margin], bc: [0.5, 1 - margin], br: [1 - margin, 1 - margin]
     };
-    var cx, cy;
+    var ncx, ncy;
     if (preset === "custom" || !presets[preset]) {
-      cx = parseFloat(pxStr) * W; cy = parseFloat(pyStr) * H;
+      ncx = clamp(parseFloat(pxStr), 0, 1); ncy = clamp(parseFloat(pyStr), 0, 1);
     } else {
-      cx = presets[preset][0] * W; cy = presets[preset][1] * H;
+      ncx = presets[preset][0]; ncy = presets[preset][1];
     }
     var scale = clamp(parseFloat(scalePctStr), 5, 400);
     var borderOn = String(borderStr) === "1", borderPx = parseFloat(borderPxStr);
@@ -640,30 +659,30 @@ function applyOverlay(preset, pxStr, pyStr, scalePctStr, shape,
     if (!posP || !scaleP) return "ERR|Could not find Position/Scale on the Motion effect.";
 
     if (animStyle === "none") {
-      posP.setValue([cx, cy], true);
+      posP.setValue([ncx, ncy], true);
       scaleP.setValue(scale, true);
     } else if (animStyle === "slide") {
-      var offX = cx, offY = cy;
+      var offX = ncx, offY = ncy;
       var edgeDist = 0.35;
-      if (cx < W / 2) offX = -W * edgeDist; else if (cx > W / 2) offX = W * (1 + edgeDist);
-      if (cy < H / 2 && cx === W / 2) offY = -H * edgeDist; else if (cy > H / 2 && cx === W / 2) offY = H * (1 + edgeDist);
+      if (ncx < 0.5) offX = -edgeDist; else if (ncx > 0.5) offX = 1 + edgeDist;
+      if (ncy < 0.5 && ncx === 0.5) offY = -edgeDist; else if (ncy > 0.5 && ncx === 0.5) offY = 1 + edgeDist;
       setKeyframe(posP, t0, [offX, offY]);
       setKeyframe(scaleP, t0, scale);
       for (var i = 1; i <= 6; i++) {
         var f = i / 6, e = easeSample(f, "easeOut");
-        setKeyframe(posP, t0 + (t1 - t0) * f, [offX + (cx - offX) * e, offY + (cy - offY) * e]);
+        setKeyframe(posP, t0 + (t1 - t0) * f, [offX + (ncx - offX) * e, offY + (ncy - offY) * e]);
         setKeyframe(scaleP, t0 + (t1 - t0) * f, scale);
       }
     } else if (animStyle === "pop") {
-      setKeyframe(posP, t0, [cx, cy]);
+      setKeyframe(posP, t0, [ncx, ncy]);
       setKeyframe(scaleP, t0, Math.max(1, scale * 0.02));
       for (var j = 1; j <= 6; j++) {
         var f2 = j / 6, e2 = easeSample(f2, "easeOut");
-        setKeyframe(posP, t0 + (t1 - t0) * f2, [cx, cy]);
+        setKeyframe(posP, t0 + (t1 - t0) * f2, [ncx, ncy]);
         setKeyframe(scaleP, t0 + (t1 - t0) * f2, Math.max(1, scale * 0.02) + (scale - Math.max(1, scale * 0.02)) * e2);
       }
     } else if (animStyle === "fade") {
-      posP.setValue([cx, cy], true);
+      posP.setValue([ncx, ncy], true);
       scaleP.setValue(scale, true);
       var opacityComp = getComponentByMatchName(item, "AE.ADBE Opacity");
       if (opacityComp) {
