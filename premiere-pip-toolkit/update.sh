@@ -8,11 +8,12 @@ set -euo pipefail
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST_DIR="$HOME/Library/Application Support/Adobe/CEP/extensions/pip-toolkit"
 
-if [ -d "$SRC_DIR/.git" ]; then
+if git -C "$SRC_DIR" rev-parse --is-inside-work-tree > /dev/null 2>&1; then
   echo "Pulling latest changes..."
   git -C "$SRC_DIR" pull
+  echo "Now at commit: $(git -C "$SRC_DIR" rev-parse --short HEAD) - $(git -C "$SRC_DIR" log -1 --format=%s)"
 else
-  echo "This folder isn't a git clone, so there's nothing to pull - using whatever is currently in this folder."
+  echo "WARNING: this folder isn't inside a git clone, so there's nothing to pull - using whatever is currently in this folder as-is. Nothing new was fetched."
 fi
 
 # Make sure the installed extension is a symlink to this folder, not a copy.
