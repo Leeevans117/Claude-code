@@ -109,6 +109,15 @@ function fmtVal(v) {
   return String(v);
 }
 
+// Counts keyframes on a param, however this Premiere version exposes that -
+// used to tell "nothing was ever keyframed" apart from "keyframes were
+// written somewhere, but not where the user is looking." -1 means this
+// Premiere version doesn't expose a way to ask.
+function numKeysOf(param) {
+  try { if (typeof param.getKeys === "function") return param.getKeys().length; } catch (e) {}
+  return -1;
+}
+
 function trySetColor(component, displayName, hex) {
   try {
     var p = getParamByDisplayName(component, displayName);
@@ -118,6 +127,18 @@ function trySetColor(component, displayName, hex) {
   } catch (e) { return false; }
 }
 
+// Set by getTargetTrackItem() on every call to record HOW it picked the clip
+// it returned - "selection" (explicit Timeline selection) vs
+// "playhead-fallback" (nothing selected, so it grabbed whatever's under the
+// playhead) vs "none". This matters because Premiere's Effect Controls panel
+// tracks the Timeline SELECTION, not the playhead - if a tool runs via the
+// fallback path, it can keyframe a different clip than the one currently
+// showing in Effect Controls, which would look exactly like "nothing
+// happened" even though real keyframes were written correctly elsewhere.
+// See the caller-side debug strings that report this alongside which clip
+// (name/track/start) actually got targeted.
+var _lastTargetSource = "(not yet called)";
+
 // Locates the clip to operate on: the current timeline selection (first
 // video item) if there is one, otherwise the topmost video-track item
 // sitting under the playhead.
@@ -126,11 +147,12 @@ function getTargetTrackItem(seq) {
     var sel = seq.getSelection();
     if (sel && sel.length) {
       for (var i = 0; i < sel.length; i++) {
-        if (sel[i].mediaType === "Video") return sel[i];
+        if (sel[i].mediaType === "Video") { _lastTargetSource = "selection"; return sel[i]; }
       }
     }
   } catch (e) { /* getSelection() not available on very old versions */ }
 
+  _lastTargetSource = "playhead-fallback";
   var playhead = seq.getPlayerPosition().seconds;
   for (var t = seq.videoTracks.numTracks - 1; t >= 0; t--) {
     var track = seq.videoTracks[t];
@@ -139,6 +161,7 @@ function getTargetTrackItem(seq) {
       if (clip.start.seconds <= playhead && clip.end.seconds > playhead) return clip;
     }
   }
+  _lastTargetSource = "none-found";
   return null;
 }
 
@@ -217,108 +240,97 @@ function getContext() {
 
 //////////////////////// live frame thumbnail ////////////////////////
 
-// Premiere's scripting API has no direct "give me the current frame as a
-// bitmap" call. The documented way to get one is to have Premiere export a
-// still frame through its own encoder (Sequence.exportAsMediaDirect), which
-// needs a path to a PNG/JPEG export preset (.epr) file. Rather than ship a
-// hand-authored .epr - a proprietary format that's easy to get subtly wrong
-// - this searches the machine's own Adobe application-support folder for a
-// real preset Adobe already installed, and tries whichever ones it finds
-// whose filename suggests a still-image format.
+// HISTORY / WHY THIS CHANGED: the previous version of this function called
+// Premiere's real encoder (Sequence.exportAsMediaDirect) with an .epr export
+// preset found by recursively searching the whole Adobe application-support
+// folder for a filename that looked like a still-image preset. That had two
+// stacked risk sources: (a) exportAsMediaDirect() is a real, documented
+// synchronous call into Premiere's encoder pipeline on the live sequence,
+// and there's a reproducible Adobe Community report of Premiere crashing
+// roughly 1 in 3 times when it's called repeatedly in quick succession
+// (community.adobe.com "premiere crashes sporadically when using sequence
+// exportasmediadirect", question 685820); (b) the preset it fed to that call
+// was never actually verified - just whatever filename matched a regex on
+// the user's own machine, with unknown codec/bit depth/resolution. Re-export
+// research (2026) turned up a materially safer, still-real primitive that
+// removes both of those risk sources instead of just mitigating them.
 //
-// exportAsMediaDirect() is a genuinely risky call to make casually:
-//  - It's DOCUMENTED/verified as synchronous - it blocks Premiere's single
-//    UI/ExtendScript thread for as long as the render takes, on the live
-//    sequence, using whatever .epr preset was found (which may not be a
-//    small/fast one - there's no way to verify a preset's codec, bit depth,
-//    color space, or resolution before handing it to the encoder).
-//  - There's a real, reproducible Adobe Community report of Premiere
-//    crashing roughly 1 in 3 times specifically when exportAsMediaDirect()
-//    is called repeatedly/in a loop, with Premiere becoming unresponsive
-//    right after an export finishes and the next call never starting -
-//    see: community.adobe.com "premiere crashes sporadically when using
-//    sequence exportasmediadirect" (question 685820). That is exactly the
-//    calling pattern this feature used to have: multiple candidate presets
-//    tried back-to-back inside one call, and the whole thing re-run
-//    automatically every time the panel's tab changed.
-//  - The work area type argument matters: app.encoder.ENCODE_WORKAREA is
-//    the documented/verified constant for "honor the in/out I just set"
-//    (see Adobe-CEP/Samples PProPanel/jsx/PPRO/Premiere.jsx, which calls
-//    exportAsMediaDirect(path, preset, app.encoder.ENCODE_WORKAREA) for
-//    exactly this "render a short work-area bracket" use case). This used
-//    to pass the bare literal 1 instead, which is guessing at the enum's
-//    underlying ordinal - if it happened to resolve to ENCODE_ENTIRE or
-//    ENCODE_IN_TO_OUT on this Premiere build instead of ENCODE_WORKAREA,
-//    every "grab one frame" attempt could have silently rendered the WHOLE
-//    active sequence (all tracks, all adjustment layers) through an
-//    unverified preset, synchronously, on the live project - a very
-//    plausible way to produce exactly the kind of crash reported here.
+// THE REPLACEMENT: Premiere's "QE" (Quality Engineering) automation DOM -
+// the same undocumented-but-long-standing layer this file already uses
+// elsewhere for addFilterByMatchName() - exposes
+// qe.project.getActiveSequence().exportFramePNG(timecode, filePath). This:
+//   - needs NO export preset at all (no filesystem search, no shipped .epr,
+//     nothing to fail to verify) - it's a direct "rasterize this one frame
+//     to a PNG" call, not a run through the encoder-preset pipeline;
+//   - takes an explicit timecode argument, so it needs no sequence in/out
+//     point mutation (the old code had to set + restore a work area, with a
+//     documented half-mutated-state failure mode if only one of those calls
+//     threw - that entire risk category is gone too);
+//   - is real: it ships in Adobe's own official sample
+//     (github.com/Adobe-CEP/Samples, TypeScript/PProPanel-vscode/dom_app/src/
+//     Premiere.jsx, function exportCurrentFrameAsPNG - fetched and read
+//     directly, not taken on faith) which calls exactly
+//     `app.enableQE(); qe.project.getActiveSequence().exportFramePNG(
+//     activeSequence.CTI.timecode, outputFileName)`, and independently
+//     appears with the identical signature in the community-maintained
+//     type definitions at github.com/aenhancers/types-for-adobe-extras,
+//     path Premiere/12.0/qeDom.d.ts (version "12.0" - the same CEP
+//     generation this panel targets): `exportFramePNG(timecode: string,
+//     filePath: string): any` on the QE Sequence interface, alongside
+//     `CTI: QETime` / `QETime.timecode: string`. A third, independent data
+//     point: github.com/Adobe-CEP/Samples issue #129 is a real bug report
+//     from someone using this exact call in a shipped panel (about the CTI
+//     timecode string needing to stay unmodified when passed to
+//     exportFramePNG, even though a sanitized copy is used for the output
+//     filename - the fix applied below).
+//   - is NOT in Adobe's officially documented scripting guide (confirmed by
+//     directly reading Adobe's own generated API reference,
+//     Adobe-CEP/Samples TypeScript/PProPanel-vscode/payloads/api_doc.html,
+//     which documents exportAsMediaDirect and app.encoder in detail but has
+//     no exportFramePNG entry anywhere) - same "QE DOM" caveat as
+//     addFilterByMatchName() elsewhere in this file: unsupported, but a
+//     long-established real pattern, not a guess.
+//   - has one confirmed compatibility caveat: Adobe Community reports place
+//     it working from Premiere 2021 (v15) through at least v25.3 (2025) in
+//     real panels; a report against v14.x describes a "Run Script Error /
+//     undefined is not an object" for this call, which this function
+//     detects (typeof check below) and reports clearly rather than
+//     assuming it will work. This panel's manifest currently allows down to
+//     v14.0 - if that's the Premiere version in use, expect getFrameThumbnail()
+//     to report unavailability rather than produce a preview.
 //
-// Given all of that, this function now: (1) always uses the documented
-// ENCODE_WORKAREA constant instead of a guessed literal, (2) only ever
-// runs the (expensive, whole-of-Adobe) preset search once per Premiere
-// session and reuses the result, (3) refuses to run again while a call is
-// still in flight or within a short cooldown of the last attempt, and (4)
-// only tries a small batch of candidate presets per call instead of
-// hammering through every match it finds. getFrameThumbnail() still
-// reports exactly what it tried and why it failed rather than just
-// returning nothing - see README.md for how this is now wired into the UI
-// (manual/opt-in only, never automatic on tab switch).
+// ENCODE_WORKAREA RE-VERIFICATION (asked for explicitly, since this
+// function no longer uses it but applyOverlay/applyZoom-adjacent code
+// elsewhere in the project history relied on the same encoder constants
+// being real): app.encoder.ENCODE_WORKAREA is confirmed as one of exactly
+// three valid workAreaType values (ENCODE_WORKAREA / ENCODE_ENTIRE /
+// ENCODE_IN_TO_OUT) for Sequence.exportAsMediaDirect() and
+// app.encoder.encodeSequence(), independently via (1) Adobe's own generated
+// api_doc.html referenced above, which documents
+// `exportAsMediaDirect(outputFilePath, outputPresetPath, workAreaType)` and
+// states workAreaType "can be ENCODE_WORKAREA, ENCODE_ENTIRE, or
+// ENCODE_IN_TO_OUT", and (2) pymiere (github.com/qmasingarbe/pymiere), a
+// third-party Python wrapper around this exact ExtendScript API, whose docs
+// demonstrate calling it as the named property
+// `pymiere.objects.app.encoder.ENCODE_ENTIRE` (i.e. confirmed to be
+// accessed as a named constant on the encoder object, not a numeric literal
+// someone guessed at). Not currently called anywhere in this file, but
+// confirmed real should a future feature need it - use the named constant,
+// never a bare literal ordinal.
+//
+// This is still an undocumented API and still hasn't been confirmed to
+// produce a working PNG on a real Premiere install - only confirmed to be a
+// real, Adobe-sample-verified call rather than a guess. It's kept
+// manual/opt-in only (never automatic on tab switch or the periodic context
+// refresh - see refreshThumbnail() in main.js) with an in-flight guard and a
+// short cooldown as a precaution, even without a specific crash report tied
+// to exportFramePNG the way the old exportAsMediaDirect path had one -
+// there's simply no affirmative evidence this QE call is safe to hammer
+// repeatedly either, and it still runs on the live sequence.
 
-var _thumbPresetCache = null;   // null until findStillFramePresets() has run once this session
-var _thumbCandidateOffset = 0;  // rotates which small batch of candidates gets tried next
 var _thumbInProgress = false;
 var _thumbLastAttemptMs = 0;
-var THUMB_COOLDOWN_MS = 4000;        // matches the "don't call it repeatedly in quick succession" lesson above
-var THUMB_MAX_CANDIDATES_PER_CALL = 3;
-var THUMB_FS_VISIT_BUDGET = 8000;    // hard cap on files/folders touched per search, independent of the 300-match cap
-
-function findFilesRecursive(folder, pattern, maxDepth, results, depth, budget) {
-  if (depth > maxDepth || results.length > 300 || budget.count >= budget.max) return;
-  var items;
-  try { items = folder.getFiles(); } catch (e) { return; }
-  for (var i = 0; i < items.length; i++) {
-    budget.count++;
-    if (budget.count >= budget.max) return;
-    var item = items[i];
-    if (item instanceof Folder) {
-      findFilesRecursive(item, pattern, maxDepth, results, depth + 1, budget);
-    } else if (item instanceof File && pattern.test(item.name)) {
-      results.push(item.fsName);
-    }
-    if (results.length > 300) return;
-  }
-}
-
-// Runs the recursive .epr search at most once per Premiere session - the
-// result (top-level vars in a CEP host script persist for the life of the
-// panel, per Adobe's own CEP HTML Extension Cookbook) is cached in
-// _thumbPresetCache so every subsequent call is free instead of re-walking
-// the whole Adobe application-support tree again.
-function findStillFramePresets() {
-  if (_thumbPresetCache) return _thumbPresetCache;
-
-  var roots = [];
-  if ($.os.indexOf("Windows") !== -1) {
-    roots.push(new Folder("C:/Program Files/Common Files/Adobe"));
-    roots.push(new Folder(Folder.appData.fsName + "/Adobe"));
-  } else {
-    roots.push(new Folder("/Library/Application Support/Adobe"));
-  }
-
-  var all = [];
-  var budget = { count: 0, max: THUMB_FS_VISIT_BUDGET };
-  for (var r = 0; r < roots.length; r++) {
-    if (roots[r].exists) findFilesRecursive(roots[r], /\.epr$/i, 6, all, 0, budget);
-  }
-
-  var preferred = [];
-  for (var i = 0; i < all.length; i++) {
-    if (/png|jpe?g|still|frame/i.test(all[i])) preferred.push(all[i]);
-  }
-  _thumbPresetCache = { preferred: preferred, all: all };
-  return _thumbPresetCache;
-}
+var THUMB_COOLDOWN_MS = 1500; // debounce only (no confirmed repeat-call crash report for exportFramePNG) - see note above
 
 function getFrameThumbnail() {
   if (_thumbInProgress) {
@@ -326,74 +338,74 @@ function getFrameThumbnail() {
   }
   var now = new Date().getTime();
   if (_thumbLastAttemptMs && (now - _thumbLastAttemptMs) < THUMB_COOLDOWN_MS) {
-    var waitSec = Math.ceil((THUMB_COOLDOWN_MS - (now - _thumbLastAttemptMs)) / 1000);
-    return "ERR|Frame preview is cooling down (calling Premiere's encoder repeatedly in quick succession is a known crash risk) - wait " + waitSec + "s and try again.";
+    var waitSec = Math.ceil((THUMB_COOLDOWN_MS - (now - _thumbLastAttemptMs)) / 1000) || 1;
+    return "ERR|Frame preview is cooling down - wait " + waitSec + "s and try again.";
   }
 
   _thumbInProgress = true;
   _thumbLastAttemptMs = now;
   try {
-    var seq = getActiveSeq();
-    var playhead = seq.getPlayerPosition().seconds;
+    getActiveSeq(); // throws its own clear message if there's no active sequence
 
-    var fps = 30;
     try {
-      if (seq.videoFrameRate && seq.videoFrameRate.ticks) fps = 254016000000 / seq.videoFrameRate.ticks;
-    } catch (e) { /* fall back to 30 */ }
-    var frameDur = 1 / fps;
-
-    var origIn, origOut, hadWorkArea = true;
-    try { origIn = seq.getInPoint(); origOut = seq.getOutPoint(); } catch (e) { hadWorkArea = false; }
-
-    // setInPoint() can succeed while the paired setOutPoint() throws (or vice
-    // versa) - if that happens, don't return early leaving the sequence's
-    // work area half-mutated (in point moved, out point untouched); restore
-    // whatever original bounds we captured above before reporting the error.
-    try { seq.setInPoint(playhead); seq.setOutPoint(playhead + frameDur * 2); }
-    catch (e) {
-      if (hadWorkArea) { try { seq.setInPoint(origIn); seq.setOutPoint(origOut); } catch (e2) {} }
-      return "ERR|Could not set a work area on the sequence to export from: " + e.toString();
+      app.enableQE();
+    } catch (e) {
+      return "ERR|Could not enable Premiere's QE automation layer (needed for the live preview): " + e.toString();
+    }
+    if (typeof qe === "undefined" || !qe || !qe.project) {
+      return "ERR|Premiere's QE automation layer isn't available in this Premiere version - live preview can't work here.";
     }
 
-    var found = findStillFramePresets();
-    var full = found.preferred.length ? found.preferred : found.all;
-
-    if (!full.length) {
-      if (hadWorkArea) { try { seq.setInPoint(origIn); seq.setOutPoint(origOut); } catch (e) {} }
-      return "ERR|No .epr export preset found under Adobe's application support folder on this machine.";
+    var qeSeq;
+    try { qeSeq = qe.project.getActiveSequence(); } catch (e) { qeSeq = null; }
+    if (!qeSeq) {
+      return "ERR|Could not get the active sequence through Premiere's QE automation layer.";
+    }
+    if (typeof qeSeq.exportFramePNG !== "function") {
+      return "ERR|This Premiere version's QE automation layer has no exportFramePNG call - live preview needs Premiere 2021 (v15) or newer.";
     }
 
-    // Try only a small rotating batch per call (never the whole list) so one
-    // request can't fire off a long back-to-back run of real encoder calls -
-    // that repeated-call pattern is the documented crash trigger. If none of
-    // this batch works, the NEXT call (after the cooldown) picks up where
-    // this one left off, so repeated manual retries still eventually cover
-    // every candidate rather than looping the same failing ones forever.
-    var startIdx = _thumbCandidateOffset % full.length;
-    var batch = [];
-    var batchSize = Math.min(THUMB_MAX_CANDIDATES_PER_CALL, full.length);
-    for (var bi = 0; bi < batchSize; bi++) batch.push(full[(startIdx + bi) % full.length]);
-    _thumbCandidateOffset = (startIdx + batchSize) % full.length;
-
-    var dest = new File(Folder.temp.fsName + "/pip_toolkit_thumb.png");
-    if (dest.exists) { try { dest.remove(); } catch (e) {} }
-
-    var success = false, lastErr = "", triedCount = 0;
-    for (var i = 0; i < batch.length && !success; i++) {
-      triedCount++;
-      try {
-        // ENCODE_WORKAREA is the documented/verified constant for "honor the
-        // in/out points I just set" - see the block comment above this
-        // function for why a guessed literal here is unsafe.
-        seq.exportAsMediaDirect(dest.fsName, batch[i], app.encoder.ENCODE_WORKAREA);
-        if (dest.exists) success = true;
-      } catch (e) { lastErr = e.toString(); }
+    var timecode;
+    try { timecode = qeSeq.CTI.timecode; } catch (e) {
+      return "ERR|Could not read the current playhead timecode: " + e.toString();
     }
 
-    if (hadWorkArea) { try { seq.setInPoint(origIn); seq.setOutPoint(origOut); } catch (e) {} }
+    // exportFramePNG's filePath argument takes no extension - it appends
+    // ".png" itself (matches Adobe's own sample, which passes a bare path).
+    // A Premiere 25.3 Community report describes that specific build adding
+    // an extra ".png" on top of that, so rather than assume either behavior
+    // this checks every plausible resulting filename and uses whichever one
+    // actually exists after the call, instead of guessing which one Premiere
+    // used on this build.
+    var destBase = Folder.temp.fsName + "/pip_toolkit_thumb";
+    var candidates = [destBase, destBase + ".png", destBase + ".png.png"];
+    for (var ci = 0; ci < candidates.length; ci++) {
+      var stale = new File(candidates[ci]);
+      if (stale.exists) { try { stale.remove(); } catch (e) {} }
+    }
 
-    if (success) return "OK|" + dest.fsName;
-    return "ERR|Tried " + triedCount + " of " + full.length + " known export preset(s), none produced a file (hit refresh again to try the next batch). Last error: " + (lastErr || "(none thrown, file just never appeared)");
+    var callErr = "";
+    try {
+      // IMPORTANT: pass the timecode string exactly as read from CTI -
+      // Adobe-CEP/Samples issue #129 documents a real bug where a Premiere
+      // panel sanitized this string (replacing ":"/";" with "_" for
+      // filename safety) and then passed the SANITIZED string to
+      // exportFramePNG instead of the original, breaking the export. The
+      // sanitizing (if any were needed) belongs only on the filename, which
+      // here is a fixed literal anyway - so no sanitizing is needed at all.
+      qeSeq.exportFramePNG(timecode, destBase);
+    } catch (e) {
+      callErr = e.toString();
+    }
+
+    var found = null;
+    for (var fi = 0; fi < candidates.length; fi++) {
+      var f = new File(candidates[fi]);
+      if (f.exists) { found = f.fsName; break; }
+    }
+
+    if (found) return "OK|" + found;
+    return "ERR|exportFramePNG did not produce a file" + (callErr ? " (" + callErr + ")" : " (no error thrown, file just never appeared)") + ".";
   } catch (e) {
     return "ERR|" + e.toString();
   } finally {
@@ -463,8 +475,28 @@ function applyZoom(pxStr, pyStr, scalePctStr, inSecStr, holdSecStr, outSecStr, z
     var t0 = clamp(playhead - inSec, clipStart, clipEnd);
     var t1 = clamp(playhead, clipStart, clipEnd);
 
+    // Identify exactly which clip this run targeted, and how it was chosen -
+    // Effect Controls only ever displays keyframes for the Timeline's actual
+    // SELECTED clip, so if _lastTargetSource is "playhead-fallback" and that
+    // resolves to a clip other than the one the user is looking at (e.g. a
+    // leftover duplicate from earlier Highlight testing on another track),
+    // everything below can work perfectly and still look like nothing
+    // happened. Reported in the debug string so this is checkable, not
+    // assumed.
+    var targetTrackIdx = trackIndexOf(seq, item);
+    var targetDesc = String(item.name).replace(/\|/g, "-") + " (track " + targetTrackIdx +
+      ", " + item.start.seconds.toFixed(3) + "-" + item.end.seconds.toFixed(3) + "s, via " + _lastTargetSource + ")";
+
     var keyTime0 = setKeyframe(posParam, t0, neutralPos);
     setKeyframe(scaleParam, t0, 100);
+
+    // Read back and check time-varying state immediately after the very
+    // FIRST keyframe write, before the ramp loop runs any further sets -
+    // this tells apart "it never stuck in the first place" from "it stuck
+    // here, then something later in this same run clobbered it."
+    var isTimeVaryingAfterFirst;
+    try { isTimeVaryingAfterFirst = posParam.isTimeVarying(); } catch (e) { isTimeVaryingAfterFirst = "(unreadable)"; }
+    var readbackFirst = readParamValue(posParam, keyTime0);
 
     var steps = 6, i, f, e, s, tt, keyTimePeak;
     for (i = 1; i <= steps; i++) {
@@ -495,7 +527,19 @@ function applyZoom(pxStr, pyStr, scalePctStr, inSecStr, holdSecStr, outSecStr, z
     // stuck - this is the hard evidence needed if the value is still wrong.
     var readback0 = readParamValue(posParam, keyTime0);
     var readbackPeak = readParamValue(posParam, keyTimePeak);
-    return "OK|debug:intended0=" + fmtVal(neutralPos) + " actual0=" + fmtVal(readback0) +
+    var posKeyCount = numKeysOf(posParam);
+    var scaleKeyCount = numKeysOf(scaleParam);
+    var isTimeVaryingFinal;
+    try { isTimeVaryingFinal = posParam.isTimeVarying(); } catch (e) { isTimeVaryingFinal = "(unreadable)"; }
+
+    return "OK|debug:target=" + targetDesc +
+      " t0=" + t0.toFixed(3) + " t1=" + t1.toFixed(3) +
+      " neutralPos=" + fmtVal(neutralPos) + " zoomedPos=" + fmtVal(zoomedPos) +
+      " isTimeVaryingAfterFirstKey=" + fmtVal(isTimeVaryingAfterFirst) +
+      " isTimeVaryingFinal=" + fmtVal(isTimeVaryingFinal) +
+      " readbackImmediatelyAfterFirstKey=" + fmtVal(readbackFirst) +
+      " posKeyCount=" + posKeyCount + " scaleKeyCount=" + scaleKeyCount +
+      " intended0=" + fmtVal(neutralPos) + " actual0=" + fmtVal(readback0) +
       " intendedPeak=" + fmtVal(zoomedPos) + " actualPeak=" + fmtVal(readbackPeak);
   } catch (e) {
     return "ERR|" + e.toString();
