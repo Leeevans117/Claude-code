@@ -60,6 +60,20 @@ function getComponentByMatchName(trackItem, matchName) {
   return null;
 }
 
+// Same idea as getComponentByMatchName(), but by the component's displayName
+// instead - used as a fallback when a guessed matchName turns out wrong (see
+// addFilterByMatchName()'s post-add lookup). displayName is localized, so
+// this is only a safety net for the single-Locale "All"/English case this
+// panel already assumes elsewhere (see manifest.xml), not a general
+// replacement for matchName lookups.
+function getComponentByDisplayName(trackItem, displayName) {
+  var comps = trackItem.components;
+  for (var i = 0; i < comps.numItems; i++) {
+    if (comps[i].displayName === displayName) return comps[i];
+  }
+  return null;
+}
+
 function getParamByDisplayName(component, displayName) {
   for (var i = 0; i < component.properties.numItems; i++) {
     var p = component.properties[i];
@@ -165,6 +179,29 @@ function getTargetTrackItem(seq) {
   return null;
 }
 
+// Describes what's currently selected in the Timeline, independent of what
+// getTargetTrackItem() actually targeted. Effect Controls always displays
+// keyframes for the Timeline SELECTION, not for whatever a tool operated on
+// - so when _lastTargetSource is "playhead-fallback", real keyframes can
+// land on a clip that isn't the one Effect Controls is showing, and it looks
+// exactly like nothing happened. Reporting the current selection explicitly
+// alongside the targeted clip (see applyZoom()'s debug string) means a
+// mismatch is stated outright, not something the user has to infer from
+// "via playhead-fallback" on its own.
+function describeSelection(seq) {
+  try {
+    var sel = seq.getSelection();
+    if (!sel || !sel.length) return "(nothing selected in Timeline)";
+    var names = [];
+    for (var i = 0; i < sel.length; i++) {
+      names.push(String(sel[i].name).replace(/\|/g, "-") + (sel[i].mediaType ? " [" + sel[i].mediaType + "]" : ""));
+    }
+    return names.join(", ");
+  } catch (e) {
+    return "(unreadable: " + e.toString() + ")";
+  }
+}
+
 function trackIndexOf(seq, trackItem) {
   for (var t = 0; t < seq.videoTracks.numTracks; t++) {
     var track = seq.videoTracks[t];
@@ -205,8 +242,48 @@ function findEmptyTrackAbove(seq, aboveIndex, startSec, endSec) {
 // documented Component object for the newly added effect so the rest of the
 // script can keyframe it normally, or null if the QE DOM isn't cooperative
 // on this Premiere version.
+//
+// NOTE ON matchName CORRECTNESS: this is exactly the class of bug that
+// silently broke the Crop effect earlier ("AE.ADBE Crop" was wrong - the
+// real value is "AE.ADBE AECrop" - so the just-added effect could never be
+// found again by matchName and every downstream property-set silently
+// no-opped while a bare, uncustomized effect sat on the clip). The
+// matchNames below other than Alpha Glow are independently confirmed:
+// Crop ("AE.ADBE AECrop") against a real captured Premiere preset export and
+// an independent open-source Premiere-automation project's source
+// (hetpatel-11/adobe_premiere_pro_mcp, matches this exact string); Bevel
+// Edges ("AE.ADBE Bevel Edges") and Drop Shadow ("AE.ADBE Drop Shadow")
+// against the official docsforadobe/after-effects-scripting-guide
+// first-party effect matchName table (both listed there verbatim, with
+// display names "Bevel Edges"/"Drop Shadow" matching what's passed as
+// effectName here).
+//
+// Alpha Glow is NOT independently confirmed and is specifically suspected
+// wrong: it does not appear anywhere in that same official AE first-party
+// matchName table (Crop/Bevel Edges/Drop Shadow/Brightness & Contrast all
+// do), which fits Alpha Glow being a Premiere-only effect never shared with
+// After Effects - and Premiere-only effects use a different prefix. Confirmed
+// real examples of that other prefix, straight from Adobe's own official UXP
+// API docs (github.com/AdobeDocs/uxp-premiere-pro, ppro-reference/classes/
+// videofilterfactory.md, fetched and read directly): "the match name of the
+// component to create, example 'PR.ADBE Solarize', 'AE.ADBE Mosaic' etc." -
+// Solarize, like Alpha Glow, is a classic Premiere-only stylize effect, and
+// it's "PR.ADBE", not "AE.ADBE". Two independent searches turned up a claim
+// that Alpha Glow's real matchName is "PR.ADBE Alpha Glow" (sourced from the
+// community "Premiere v12 Effect Component Documentation" PDF), consistent
+// with this pattern - but that PDF's host is blocked by this environment's
+// network egress policy, so this could not be read directly and confirmed
+// the way the others were. Rather than swap one unverified guess
+// ("AE.ADBE Alpha Glow") for another ("PR.ADBE Alpha Glow"), the lookup
+// below is made robust to either being wrong: if the matchName lookup can't
+// find the component QE just added, fall back to finding it by displayName
+// instead (which only depends on effectName - the string already confirmed
+// correct, since it's what qe.project.getVideoEffectByName() used to add the
+// effect in the first place). This fixes the failure mode regardless of
+// which matchName string turns out to be right, rather than betting on an
+// unconfirmed replacement.
 function addFilterByMatchName(seq, trackItem, matchName, effectName) {
-  var existing = getComponentByMatchName(trackItem, matchName);
+  var existing = getComponentByMatchName(trackItem, matchName) || getComponentByDisplayName(trackItem, effectName);
   if (existing) return existing;
   try {
     app.enableQE();
@@ -218,7 +295,7 @@ function addFilterByMatchName(seq, trackItem, matchName, effectName) {
     var qeEffect = qe.project.getVideoEffectByName(effectName);
     if (!qeEffect) return null;
     qeItem.addVideoFilter(qeEffect);
-    return getComponentByMatchName(trackItem, matchName);
+    return getComponentByMatchName(trackItem, matchName) || getComponentByDisplayName(trackItem, effectName);
   } catch (e) {
     return null;
   }
@@ -398,14 +475,56 @@ function getFrameThumbnail() {
       callErr = e.toString();
     }
 
+    // exportFramePNG is explicitly documented as NOT synchronous - the
+    // community type definitions this function's design is sourced from
+    // (aenhancers/types-for-adobe-extras, Premiere/12.0/qeDom.d.ts, fetched
+    // and read directly) carry the comment "WARNING : all exportFrame()
+    // functions are NOT synchronous" right on this method's declaration.
+    // Checking File.exists exactly once immediately after the call (the
+    // previous version of this function) can catch the export mid-flight
+    // and report a false "no file produced" failure even though the file
+    // would have appeared moments later. Poll instead, up to a bounded
+    // timeout, using ExtendScript's blocking $.sleep() - a real, standard
+    // part of the ExtendScript "$" debugging object (confirmed via multiple
+    // independent scripting references documenting e.g. "$.sleep(5000); //
+    // wait 5 seconds"), not a Premiere-specific or guessed API.
     var found = null;
-    for (var fi = 0; fi < candidates.length; fi++) {
-      var f = new File(candidates[fi]);
-      if (f.exists) { found = f.fsName; break; }
+    var pollDeadlineMs = new Date().getTime() + 3000; // 3s: generous for one PNG frame, still bounded
+    while (!found && new Date().getTime() < pollDeadlineMs) {
+      for (var fi = 0; fi < candidates.length; fi++) {
+        var f = new File(candidates[fi]);
+        if (f.exists) { found = f.fsName; break; }
+      }
+      if (!found) { try { $.sleep(150); } catch (eSleep) { break; } }
+    }
+
+    // Same qeDom.d.ts comment also separately documents (distinct from the
+    // issue #129 filename gotcha above): "Format may require replacing
+    // [semi-]colons (';:') with underscores ('_')" for the TIMECODE
+    // ARGUMENT itself on some Premiere builds. Unconfirmed which builds -
+    // rather than guess and switch the format outright, try it only as a
+    // fallback after the documented-correct form has had its full timeout
+    // to work, and never touch destBase/candidates (the output path) here
+    // so this fallback can't reintroduce the #129 bug.
+    if (!found) {
+      var altTimecode = String(timecode).replace(/[:;]/g, "_");
+      if (altTimecode !== timecode) {
+        try { qeSeq.exportFramePNG(altTimecode, destBase); } catch (eAlt) { callErr = callErr || eAlt.toString(); }
+        var altDeadlineMs = new Date().getTime() + 3000;
+        while (!found && new Date().getTime() < altDeadlineMs) {
+          for (var fj = 0; fj < candidates.length; fj++) {
+            var f2 = new File(candidates[fj]);
+            if (f2.exists) { found = f2.fsName; break; }
+          }
+          if (!found) { try { $.sleep(150); } catch (eSleep2) { break; } }
+        }
+      }
     }
 
     if (found) return "OK|" + found;
-    return "ERR|exportFramePNG did not produce a file" + (callErr ? " (" + callErr + ")" : " (no error thrown, file just never appeared)") + ".";
+    return "ERR|exportFramePNG did not produce a file within " +
+      "~6s (tried both the original and underscore-sanitized timecode formats)" +
+      (callErr ? " (" + callErr + ")" : " (no error thrown, file just never appeared)") + ".";
   } catch (e) {
     return "ERR|" + e.toString();
   } finally {
@@ -486,6 +605,17 @@ function applyZoom(pxStr, pyStr, scalePctStr, inSecStr, holdSecStr, outSecStr, z
     var targetTrackIdx = trackIndexOf(seq, item);
     var targetDesc = String(item.name).replace(/\|/g, "-") + " (track " + targetTrackIdx +
       ", " + item.start.seconds.toFixed(3) + "-" + item.end.seconds.toFixed(3) + "s, via " + _lastTargetSource + ")";
+    // Stated explicitly, not left for the user to infer from "via
+    // playhead-fallback" alone: what the Timeline SELECTION actually is
+    // right now, since that (not the targeted clip) is what Effect Controls
+    // will display. When the two differ, this is spelled out in plain
+    // language at the very front of the return string so it can't be missed
+    // even if the status bar truncates the rest.
+    var selectionDesc = describeSelection(seq);
+    var mismatchWarning = (_lastTargetSource !== "selection")
+      ? "MISMATCH RISK: this run targeted " + targetDesc + " but the Timeline selection is " + selectionDesc +
+        " - Effect Controls shows keyframes for the SELECTION, so if that's not the clip you were watching, click on " + targetDesc + " in the Timeline to see the new keyframes. "
+      : "";
 
     var keyTime0 = setKeyframe(posParam, t0, neutralPos);
     setKeyframe(scaleParam, t0, 100);
@@ -525,6 +655,32 @@ function applyZoom(pxStr, pyStr, scalePctStr, inSecStr, holdSecStr, outSecStr, z
 
     // Read back what actually landed, rather than assuming the sets above
     // stuck - this is the hard evidence needed if the value is still wrong.
+    //
+    // HOW TO READ actual0/actualPeak IF THE PANEL STILL LOOKS FROZEN AT
+    // DEFAULTS NEXT TIME: worked through by hand, not guessed. The very last
+    // posParam write in this run (last iteration of the ramp-in loop above,
+    // when zoomOut is off) always sets zoomedPos - a computed, non-default
+    // value that depends on the click point and scale - never the frame-
+    // center default. That's true whether or not the parameter actually
+    // ended up time-varying: even if isTimeVarying somehow silently failed
+    // and every setValueAtKey() call behaved like a plain last-write-wins
+    // set instead of a real keyframe, the value it would freeze at is still
+    // zoomedPos, not the default. So:
+    //   - actualPeak != intendedPeak AND actualPeak == the true Motion
+    //     default ([0.5,0.5]/100%): the writes are not landing on THIS
+    //     param/clip at all (see mismatchWarning above - wrong-clip is the
+    //     leading explanation, since a silent isTimeVarying failure would
+    //     still show a non-default frozen value, not the exact default).
+    //   - actualPeak == intendedPeak but the value is still frozen across
+    //     the WHOLE clip when scrubbing in Premiere: the write stuck as a
+    //     static override rather than a real keyframe (isTimeVarying did
+    //     not actually take), which isTimeVaryingFinal below should also
+    //     show as false.
+    //   - actualPeak == intendedPeak and isTimeVaryingFinal is true but
+    //     Premiere still shows no animation: look at posKeyCount - if it's
+    //     much higher than the ~7-13 keys this run should have added, stale
+    //     keyframes from an earlier test run may be interleaved and worth
+    //     clearing first.
     var readback0 = readParamValue(posParam, keyTime0);
     var readbackPeak = readParamValue(posParam, keyTimePeak);
     var posKeyCount = numKeysOf(posParam);
@@ -532,7 +688,8 @@ function applyZoom(pxStr, pyStr, scalePctStr, inSecStr, holdSecStr, outSecStr, z
     var isTimeVaryingFinal;
     try { isTimeVaryingFinal = posParam.isTimeVarying(); } catch (e) { isTimeVaryingFinal = "(unreadable)"; }
 
-    return "OK|debug:target=" + targetDesc +
+    return "OK|debug:" + mismatchWarning + "target=" + targetDesc +
+      " currentSelection=" + selectionDesc +
       " t0=" + t0.toFixed(3) + " t1=" + t1.toFixed(3) +
       " neutralPos=" + fmtVal(neutralPos) + " zoomedPos=" + fmtVal(zoomedPos) +
       " isTimeVaryingAfterFirstKey=" + fmtVal(isTimeVaryingAfterFirst) +
@@ -673,6 +830,14 @@ function applyHighlight(pxStr, pyStr, pwStr, phStr, style, magnifyStr, magnifyPc
     }
 
     // --- opacity: fade style, plus the ramp-out fade back for all styles ---
+    // Opacity is an intrinsic per-clip component (like Motion), not one
+    // added via addFilterByMatchName()/QE, so it doesn't benefit from that
+    // function's displayName fallback - but unlike the QE-added effects
+    // above, a missing Opacity component/param previously failed completely
+    // silently here (no warning pushed at all), so if "AE.ADBE Opacity" ever
+    // turns out wrong on some Premiere version, the highlight box would
+    // simply never fade out with zero indication why. Warn like every other
+    // effect in this function does.
     var opacityComp = getComponentByMatchName(dup, "AE.ADBE Opacity");
     if (opacityComp) {
       var opParam = getParamByDisplayName(opacityComp, "Opacity");
@@ -683,7 +848,11 @@ function applyHighlight(pxStr, pyStr, pwStr, phStr, style, magnifyStr, magnifyPc
         }
         setKeyframe(opParam, t2, 100);
         setKeyframe(opParam, t3, 0);
+      } else {
+        warnings.push("opacity_param");
       }
+    } else {
+      warnings.push("opacity_effect");
     }
 
     // --- magnify: push in on just the highlighted region ---
@@ -848,7 +1017,8 @@ function applyOverlay(preset, pxStr, pyStr, scalePctStr, shape,
       if (opacityComp) {
         var opP = getParamByDisplayName(opacityComp, "Opacity");
         if (opP) { setKeyframe(opP, t0, 0); setKeyframe(opP, t1, 100); }
-      }
+        else warnings.push("opacity_param");
+      } else warnings.push("opacity_effect");
     }
 
     if (shape === "round") {

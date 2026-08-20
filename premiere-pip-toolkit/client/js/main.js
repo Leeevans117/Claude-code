@@ -33,6 +33,8 @@
     shadow_effect: "couldn't add Drop Shadow",
     dim_effect: "couldn't add Brightness & Contrast (dim)",
     dim_param: "Brightness parameter not found",
+    opacity_effect: "couldn't find the Opacity property on this clip - it won't fade out",
+    opacity_param: "Opacity parameter not found - it won't fade out",
     shape_round_unverified: "rounded/circle masking isn't scriptable on this Premiere version; applied as rectangle"
   };
 
