@@ -88,6 +88,87 @@ function ensureTimeVarying(param) {
   } catch (e) { /* some params can't be keyframed; caller falls back to setValue */ }
 }
 
+// PLAYBACK-SMOOTHNESS FIX (interpolation type):
+// ------------------------------------------------------------------------
+// After applyZoom()'s wrong-clip/int16-clamp bugs were fixed and confirmed
+// (7 keyframes now write correct values to the correct clip's Position/
+// Scale), the clip still visibly hard-cut straight to the zoomed-in framing
+// instead of ramping. The values were right; the MOTION wasn't. That points
+// at keyframe INTERPOLATION TYPE, not keyframe VALUES.
+//
+// Confirmed, not guessed: ComponentParam has a real, documented method for
+// this - setInterpolationTypeAtKey(time, interpolationType, [updateUI]) -
+// verified directly against the official Premiere Pro Scripting Guide
+// (docsforadobe/premiere-scripting-guide, docs/sequence/componentparam.md,
+// cloned and read directly from GitHub, not taken from a paraphrase), which
+// documents this exact signature and this exact numeric enum:
+//   0 KF_Interp_Mode_Linear   4 KF_Interp_Mode_Hold      6 KF_Interp_Mode_Time
+//   1 kfInterpMode_EaseIn_Obsolete   5 KF_Interp_Mode_Bezier
+//   2 kfInterpMode_EaseOut_Obsolete  7 kfInterpMode_TimeTransitionStart
+//   3 kfInterpMode_EaseInEaseOut_Obsolete  8 kfInterpMode_TimeTransitionEnd
+// Independently confirmed as a real, live call against a real Premiere
+// ComponentParam (not an After Effects-only lookalike, and not a doc typo)
+// via Adobe's own official first-party sample - github.com/Adobe-CEP/Samples,
+// PProPanel/jsx/PPRO/Premiere.jsx, fetched and read directly - which contains
+// the live (non-commented) call `blurriness.setInterpolationTypeAtKey(thisKey,
+// 4, true)` against a Motion-effect-style ComponentParam obtained the same
+// way posParam/scaleParam are obtained here, using the exact (time, type,
+// updateUI) argument shape docsforadobe documents. That same file's
+// commented-out alternate code path calls addKey()/setValueAtKey() and THEN
+// setInterpolationTypeAtKey(time, 5 /* Bezier */, true) as a separate,
+// deliberate step - i.e. even Adobe's own sample author's working pattern
+// treats "make it smooth" as something you must ask for explicitly after
+// creating the keyframe, not something addKey()/setValueAtKey() hand you for
+// free. A second, independently-found real snippet (an Adobe Community
+// reply, reachable only via search-engine cache in this environment since
+// community.adobe.com itself is blocked by network egress policy here - see
+// below) shows the identical pattern for a Position param specifically:
+// setTimeVarying(true); addKey(t); setValueAtKey(t, value); THEN
+// setInterpolationTypeAtKey(t, 5, 1) as its own explicit call.
+//
+// NOT independently confirmed: no source reachable from this environment
+// states in so many words "a keyframe Premiere creates via addKey() defaults
+// to Hold." The community.adobe.com threads most likely to say that outright
+// (e.g. "trouble with setValueAtKey and setInterpolationTypeAtKey for scale
+// keyframes in Premiere Pro ExtendScript") are blocked by this session's
+// network egress policy and could not be opened directly, only summarized
+// third-hand by a search tool - not trustworthy enough to state as fact here.
+//
+// Given that gap, this does NOT gamble on Hold specifically being the
+// default and does NOT gamble on Bezier (value 5) being a safe blind choice
+// either - Bezier's auto-computed tangents are a Premiere/After-Effects UI
+// convenience for hand-placed keyframes, not verified to reproduce the
+// custom per-style easeSample() curve (linear/easeIn/easeOut/easeInOut) this
+// file already samples by hand into 7 keyframes. Instead every keyframe this
+// file ever writes is forced to Linear (0) - confirmed real and the first
+// value in the documented enum above - immediately after its value is set.
+// Linear interpolation between two correctly-valued, correctly-timed
+// keyframes is a plain straight-line ramp with no jump, no matter what the
+// unconfirmed default turns out to be, and it exactly preserves the eased
+// curve shape already computed by hand-sampling 7 points along it (that
+// sampling becomes 6 short straight segments instead of 1 continuous Bezier
+// curve - visually indistinguishable at video frame rates for a sub-1-second
+// ramp). This is the single most load-bearing fix for the reported symptom.
+//
+// This function is the ONLY place every keyframe in this file gets written
+// (applyZoom's ramp, applyHighlight's crop/dim/magnify/opacity, applyOverlay's
+// slide/pop/fade) - so fixing it here fixes all three tools identically,
+// per the same "same pattern likely needs applying elsewhere" reasoning.
+var KF_INTERP_LINEAR = 0; // KF_Interp_Mode_Linear - see comment block above
+
+// Diagnostics companion to the fix above: there is no documented
+// getInterpolationTypeAtKey() to read this back afterward and PROVE it stuck
+// (confirmed by checking - the official scripting guide's full ComponentParam
+// method list, reproduced in the comment above, has no such getter). The best
+// available evidence is whether the setInterpolationTypeAtKey() CALL ITSELF
+// throws or not, tallied here and reported in each tool's return string so
+// the next live test shows directly whether this fix could even attempt to
+// apply, rather than silently assuming it worked. Reset to 0 by each public
+// entry point (applyZoom/applyHighlight/applyOverlay) before its first
+// setKeyframe() call.
+var _interpSetOkCount = 0;
+var _interpSetFailCount = 0;
+
 function setKeyframe(param, seconds, value) {
   var t = new Time();
   t.seconds = seconds;
@@ -104,6 +185,19 @@ function setKeyframe(param, seconds, value) {
     if (added && typeof added.seconds === "number") keyTime = added;
   } catch (e) { /* key may already exist here */ }
   param.setValueAtKey(keyTime, value, true);
+  // Force Linear interpolation on this keyframe - see the large comment
+  // block above setKeyframe() for why, and why Linear (not Bezier) was
+  // chosen. Wrapped defensively: setInterpolationTypeAtKey() is documented
+  // as usable "only ... with keyframeable parameter streams," the same
+  // caveat addKey()/setValueAtKey() carry, so a param that accepted those
+  // two calls should accept this one too - but nothing here assumes that
+  // holds on every Premiere version, hence the counted, non-fatal try/catch.
+  try {
+    param.setInterpolationTypeAtKey(keyTime, KF_INTERP_LINEAR, true);
+    _interpSetOkCount++;
+  } catch (eInterp) {
+    _interpSetFailCount++;
+  }
   return keyTime;
 }
 
@@ -130,6 +224,31 @@ function fmtVal(v) {
 function numKeysOf(param) {
   try { if (typeof param.getKeys === "function") return param.getKeys().length; } catch (e) {}
   return -1;
+}
+
+// Caches whether app.enableQE() has already succeeded once in this Premiere
+// session, so addFilterByMatchName() (called on every Highlight/Overlay
+// effect add) and getFrameThumbnail() (called on every manual preview
+// refresh) don't each call the real app.enableQE() API fresh on every single
+// invocation. This is NOT a confirmed fix for any specific crash - no
+// documented source was found showing repeated app.enableQE() calls
+// destabilize a session (see the investigation notes near getFrameThumbnail
+// and applyZoom for what was and wasn't found) - it's a plain, low-risk
+// reduction in how often an unsupported/undocumented API gets re-invoked,
+// independent of the confirmed-working keyframe math elsewhere in this file
+// and safe regardless of whether QE call frequency turns out to matter:
+// enableQE() only flips on access to the QE layer itself, it doesn't hand
+// back project- or sequence-specific objects (those are still re-fetched
+// fresh via qe.project.getActiveSequence() on every call, unaffected by this
+// cache), so there's no risk of this reintroducing the kind of stale-object
+// bug real-world reports describe when QE objects are cached ACROSS a
+// project switch.
+var _qeEnabledOnce = false;
+function ensureQE() {
+  if (_qeEnabledOnce) return true;
+  app.enableQE();
+  _qeEnabledOnce = true;
+  return true;
 }
 
 function trySetColor(component, displayName, hex) {
@@ -286,7 +405,7 @@ function addFilterByMatchName(seq, trackItem, matchName, effectName) {
   var existing = getComponentByMatchName(trackItem, matchName) || getComponentByDisplayName(trackItem, effectName);
   if (existing) return existing;
   try {
-    app.enableQE();
+    ensureQE();
     var vIdx = trackIndexOf(seq, trackItem);
     var cIdx = clipIndexOf(seq.videoTracks[vIdx], trackItem);
     var qeSeq = qe.project.getActiveSequence();
@@ -425,7 +544,7 @@ function getFrameThumbnail() {
     getActiveSeq(); // throws its own clear message if there's no active sequence
 
     try {
-      app.enableQE();
+      ensureQE();
     } catch (e) {
       return "ERR|Could not enable Premiere's QE automation layer (needed for the live preview): " + e.toString();
     }
@@ -551,6 +670,11 @@ function applyZoom(pxStr, pyStr, scalePctStr, inSecStr, holdSecStr, outSecStr, z
     var holdSec = Math.max(0, parseFloat(holdSecStr));
     var outSec = Math.max(0.05, parseFloat(outSecStr));
     var zoomOut = String(zoomOutStr) === "1";
+
+    // Reset the interpolation-fix diagnostics counters (see setKeyframe())
+    // for this run, before any setKeyframe() call below.
+    _interpSetOkCount = 0;
+    _interpSetFailCount = 0;
 
     var motion = getComponentByMatchName(item, "AE.ADBE Motion");
     if (!motion) return "ERR|Could not find the Motion effect on this clip.";
@@ -688,6 +812,15 @@ function applyZoom(pxStr, pyStr, scalePctStr, inSecStr, holdSecStr, outSecStr, z
     var isTimeVaryingFinal;
     try { isTimeVaryingFinal = posParam.isTimeVarying(); } catch (e) { isTimeVaryingFinal = "(unreadable)"; }
 
+    // interpLinearSetOk/interpLinearSetFail: see the KF_INTERP_LINEAR / setKeyframe()
+    // comment block near the top of this file. If interpLinearSetFail is 0 and
+    // interpLinearSetOk roughly matches posKeyCount+scaleKeyCount, the explicit
+    // Linear-interpolation fix was actually applied to every keyframe this run
+    // wrote, and a still-hard-cutting clip after this points at something other
+    // than interpolation type. If interpLinearSetFail > 0, this Premiere
+    // version's setInterpolationTypeAtKey() rejected some/all calls (report the
+    // count so that's visible, not silently swallowed) and the ramp is still
+    // riding on whatever Premiere's real default interpolation is.
     return "OK|debug:" + mismatchWarning + "target=" + targetDesc +
       " currentSelection=" + selectionDesc +
       " t0=" + t0.toFixed(3) + " t1=" + t1.toFixed(3) +
@@ -697,7 +830,8 @@ function applyZoom(pxStr, pyStr, scalePctStr, inSecStr, holdSecStr, outSecStr, z
       " readbackImmediatelyAfterFirstKey=" + fmtVal(readbackFirst) +
       " posKeyCount=" + posKeyCount + " scaleKeyCount=" + scaleKeyCount +
       " intended0=" + fmtVal(neutralPos) + " actual0=" + fmtVal(readback0) +
-      " intendedPeak=" + fmtVal(zoomedPos) + " actualPeak=" + fmtVal(readbackPeak);
+      " intendedPeak=" + fmtVal(zoomedPos) + " actualPeak=" + fmtVal(readbackPeak) +
+      " interpLinearSetOk=" + _interpSetOkCount + " interpLinearSetFail=" + _interpSetFailCount;
   } catch (e) {
     return "ERR|" + e.toString();
   }
@@ -724,6 +858,11 @@ function applyHighlight(pxStr, pyStr, pwStr, phStr, style, magnifyStr, magnifyPc
     var orig = getTargetTrackItem(seq);
     if (!orig) return "ERR|No clip selected and nothing under the playhead on a video track.";
     if (!orig.projectItem) return "ERR|Selected clip has no source media reference; can't duplicate it.";
+
+    // Reset the interpolation-fix diagnostics counters (see setKeyframe())
+    // for this run, before any setKeyframe() call below.
+    _interpSetOkCount = 0;
+    _interpSetFailCount = 0;
 
     var px = parseFloat(pxStr), py = parseFloat(pyStr), pw = parseFloat(pwStr), ph = parseFloat(phStr);
     var magnify = String(magnifyStr) === "1";
@@ -920,6 +1059,14 @@ function applyHighlight(pxStr, pyStr, pwStr, phStr, style, magnifyStr, magnifyPc
       } else warnings.push("dim_effect");
     }
 
+    // See the KF_INTERP_LINEAR / setKeyframe() comment block near the top of
+    // this file: this reports whether the explicit Linear-interpolation fix
+    // (the fix for keyframes writing correct values but still hard-cutting
+    // instead of animating) actually applied to every keyframe this run
+    // wrote, since there's no documented way to read interpolation type back
+    // and confirm it directly.
+    if (_interpSetFailCount > 0) warnings.push("interp_linear_partial:" + _interpSetOkCount + "ok/" + _interpSetFailCount + "fail");
+
     return warnings.length ? "OK|warn:" + warnings.join(",") : "OK";
   } catch (e) {
     // `dup` (the duplicate clip created above via overwriteClip) is a `var`,
@@ -952,6 +1099,11 @@ function applyOverlay(preset, pxStr, pyStr, scalePctStr, shape,
     var seq = getActiveSeq();
     var item = getTargetTrackItem(seq);
     if (!item) return "ERR|No clip selected and nothing under the playhead on a video track.";
+
+    // Reset the interpolation-fix diagnostics counters (see setKeyframe())
+    // for this run, before any setKeyframe() call below.
+    _interpSetOkCount = 0;
+    _interpSetFailCount = 0;
 
     // Position is normalized 0..1, not pixels (see the note in applyZoom()) -
     // so the preset table and the custom px/py input stay in that space and
@@ -1051,6 +1203,13 @@ function applyOverlay(preset, pxStr, pyStr, scalePctStr, shape,
         if (pOp) { try { pOp.setValue((shadowOpacity / 100) * 255, true); } catch (e) {} }
       } else warnings.push("shadow_effect");
     }
+
+    // See the KF_INTERP_LINEAR / setKeyframe() comment block near the top of
+    // this file: reports whether the explicit Linear-interpolation fix
+    // actually applied to every keyframe this run wrote (slide/pop/fade
+    // animate-in), since there's no documented way to read interpolation
+    // type back and confirm it directly.
+    if (_interpSetFailCount > 0) warnings.push("interp_linear_partial:" + _interpSetOkCount + "ok/" + _interpSetFailCount + "fail");
 
     return warnings.length ? "OK|warn:" + warnings.join(",") : "OK";
   } catch (e) {
